@@ -6,13 +6,15 @@ const path = require('path');
 const { exec } = require('child_process');
 const express = require('express'); 
 
+// The API key is securely pulled from Render's Environment Variables
 const openai = new OpenAI({ 
     apiKey: process.env.OPENAI_API_KEY,
     timeout: 60000,   
     maxRetries: 3     
 });
 
-let agentModeActive = false; 
+// 🔥 AMNESIA FIX: Agent is now ON by default when the server boots
+let agentModeActive = true; 
 
 // 🧠 TRUE MEMORY BANK
 const chatHistory = {}; 
@@ -51,7 +53,7 @@ async function startAgent() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
-        if (connection === 'open') console.log('🚀 KUKATAI EXECUTIVE ASSISTANT (MASTER CLOUD VERSION) IS LIVE!');
+        if (connection === 'open') console.log('🚀 KUKATAI EXECUTIVE ASSISTANT (AUTONOMOUS CLOUD VERSION) IS LIVE!');
         if (connection === 'close') startAgent();
     });
 
@@ -92,7 +94,7 @@ async function startAgent() {
             const isStickerMessage = msg.message.stickerMessage;
             const isImageMessage = msg.message.imageMessage;
 
-            // 🎛️ REMOTE SWITCH
+            // 🎛️ MANUAL REMOTE SWITCH
             if (fromMe && textMessage) {
                 const lowerMsg = textMessage.toLowerCase().trim();
                 if (lowerMsg === '.agent on') {
@@ -102,7 +104,7 @@ async function startAgent() {
                 }
                 if (lowerMsg === '.agent off') {
                     agentModeActive = false;
-                    await sock.sendMessage(remoteJid, { text: "👋 *Assistant Mode Deactivated.* Welcome back, boss." });
+                    await sock.sendMessage(remoteJid, { text: "👋 *Assistant Mode Deactivated.* Bot is now sleeping." });
                     continue;
                 }
             }
