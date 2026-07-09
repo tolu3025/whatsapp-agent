@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const express = require('express'); 
+const mongoose = require('mongoose'); // Added MongoDB ODM
 
 const openai = new OpenAI({ 
     apiKey: process.env.OPENAI_API_KEY,
@@ -12,21 +13,25 @@ const openai = new OpenAI({
     maxRetries: 3     
 });
 
+// 📦 CONNECT TO MONGO CLOUD DATABASE
+const mongoURI = process.env.MONGODB_URI;
+if (!mongoURI) {
+    console.error("❌ CRITICAL ERROR: MONGODB_URI environment variable is missing!");
+} else {
+    mongoose.connect(mongoURI)
+        .then(() => console.log("📦 PERMANENT DATABASE: Connected to MongoDB Atlas Cloud!"))
+        .catch(err => console.error("❌ MongoDB Connection Error:", err.message));
+}
+
+// 🗄️ DEFINE THE USER MEMORY SCHEMA
+const UserSchema = new mongoose.Schema({
+    remoteJid: { type: String, required: true, unique: true },
+    knownFacts: { type: [String], default: [] }
+});
+const User = mongoose.model('User', UserSchema);
+
 let agentModeActive = true; 
 const chatHistory = {}; 
-
-const dbPath = path.join(__dirname, 'users.json');
-
-function loadUsers() {
-    if (fs.existsSync(dbPath)) return JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-    return {};
-}
-
-function saveUsers(users) {
-    fs.writeFileSync(dbPath, JSON.stringify(users, null, 2));
-}
-
-let usersDB = loadUsers();
 
 function convertAudio(inputPath, outputPath) {
     return new Promise((resolve, reject) => {
@@ -60,7 +65,7 @@ async function startAgent() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
-        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (WITH VISION ENABLED)!");
+        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (CLOUD DATABASE ARMED)!");
         if (connection === 'close') startAgent();
     });
 
@@ -76,7 +81,6 @@ async function startAgent() {
             const isNewsletter = remoteJid.endsWith('@newsletter');
             const fromMe = msg.key.fromMe;
             
-            // 👁️ IMAGE DETECTION ADDED HERE
             const isImageMessage = !!msg.message.imageMessage;
             
             let textMessage = msg.message.conversation || 
@@ -96,7 +100,6 @@ async function startAgent() {
             }
 
             if (isStatus || isNewsletter) continue;
-            // Ignore messages that have no text AND no image
             if (!textMessage && !isImageMessage) continue;
 
             // 📡 1. THE GROUP CHAT RADAR
@@ -109,7 +112,6 @@ async function startAgent() {
                 const isTriggered = isTagged || lowerMsg.includes('toluwanimi') || lowerMsg.includes('admin') || lowerMsg.includes('softdev') || lowerMsg.includes('agent');
 
                 if (isTriggered) {
-                    console.log(`📡 Group Radar Triggered!`);
                     try {
                         const completion = await openai.chat.completions.create({
                             model: "gpt-4o-mini",
@@ -134,7 +136,18 @@ async function startAgent() {
             if (!isGroup && agentModeActive && !fromMe) {
                 console.log(`🎯 Processing DM for ${remoteJid}...`);
                 
-                let userProfile = usersDB[remoteJid] || { knownFacts: [] };
+                // 📡 CLOUD FETCH: Pull user profile from permanent database asynchronously
+                let userProfile;
+                try {
+                    userProfile = await User.findOne({ remoteJid });
+                    if (!userProfile) {
+                        userProfile = new User({ remoteJid, knownFacts: [] });
+                    }
+                } catch (dbErr) {
+                    console.error("Database fetch failure, defaulting to safe state:", dbErr.message);
+                    userProfile = { knownFacts: [] };
+                }
+
                 let memoryString = userProfile.knownFacts.length > 0 
                     ? userProfile.knownFacts.map(f => "- " + f).join('\n') 
                     : "- No facts known yet.";
@@ -173,13 +186,11 @@ async function startAgent() {
 
                     openAiMessages.push(...chatHistory[remoteJid]);
 
-                    // 👁️ VISION ENGINE: If the user sent an image, download it and show it to the AI
                     if (isImageMessage) {
                         console.log("📸 Downloading image for AI analysis...");
                         const imgBuffer = await downloadMediaMessage(msg, 'buffer', {});
                         const base64Image = imgBuffer.toString('base64');
                         
-                        // Replace the last message in the array with a Vision format
                         openAiMessages[openAiMessages.length - 1] = {
                             role: "user",
                             content: [
@@ -197,11 +208,14 @@ async function startAgent() {
                     let replyText = completion.choices[0].message.content;
 
                     const memoryMatch = replyText.match(/\[MEMORY:(.*?)\]/i);
-                    if (memoryMatch) {
+                    if (memoryMatch && typeof userProfile.save === 'function') {
                         const newFact = memoryMatch[1].trim();
                         userProfile.knownFacts.push(newFact);
-                        usersDB[remoteJid] = userProfile;
-                        saveUsers(usersDB);
+                        
+                        // 📡 CLOUD SAVE: Commit facts natively to the cloud
+                        await userProfile.save();
+                        console.log(`\n💾 PERMANENT MEMORY CLOUD SAVED: ${newFact}\n`);
+                        
                         replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
                     }
                     
