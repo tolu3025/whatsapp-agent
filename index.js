@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, delay, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, initAuthCreds, BufferJSON, proto, delay, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { OpenAI } = require('openai');
 const pino = require('pino');
 const fs = require('fs');
@@ -23,13 +23,74 @@ if (!mongoURI) {
         .catch(err => console.error("❌ MongoDB Connection Error:", err.message));
 }
 
-// 🗄️ UPGRADED DATABASE SCHEMA (NOW INCLUDES CHAT HISTORY)
+// 🗄️ UPGRADED DATABASE SCHEMAS
+// 1. User Memory Schema
 const UserSchema = new mongoose.Schema({
     remoteJid: { type: String, required: true, unique: true },
     knownFacts: { type: [String], default: [] },
-    chatHistory: { type: Array, default: [] } // <-- Short-Term Memory is now in the cloud!
+    chatHistory: { type: Array, default: [] } 
 });
 const User = mongoose.model('User', UserSchema);
+
+// 2. NEW: Authentication State Schema (Prevents Render Amnesia)
+const AuthSchema = new mongoose.Schema({
+    _id: { type: String, required: true },
+    data: { type: String, required: true }
+});
+const Auth = mongoose.model('Auth', AuthSchema);
+
+// 🔐 CUSTOM MONGODB AUTH ADAPTER
+async function useMongoDBAuthState() {
+    const writeData = async (data, id) => {
+        const stringified = JSON.stringify(data, BufferJSON.replacer);
+        await Auth.updateOne({ _id: id }, { $set: { data: stringified } }, { upsert: true });
+    };
+    
+    const readData = async (id) => {
+        const doc = await Auth.findOne({ _id: id });
+        if (doc && doc.data) {
+            return JSON.parse(doc.data, BufferJSON.reviver);
+        }
+        return null;
+    };
+    
+    const removeData = async (id) => {
+        await Auth.deleteOne({ _id: id });
+    };
+
+    const creds = await readData('creds') || initAuthCreds();
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(ids.map(async id => {
+                        let value = await readData(`${type}-${id}`);
+                        if (type === 'app-state-sync-key' && value) {
+                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        }
+                        data[id] = value;
+                    }));
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            tasks.push(value ? writeData(value, key) : removeData(key));
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: () => writeData(creds, 'creds')
+    };
+}
 
 let agentModeActive = true; 
 
@@ -43,7 +104,8 @@ function convertAudio(inputPath, outputPath) {
 }
 
 async function startAgent() {
-    const { state, saveCreds } = await useMultiFileAuthState('agent_auth');
+    // 🚀 SWITCHED FROM LOCAL FOLDER TO MONGODB AUTH
+    const { state, saveCreds } = await useMongoDBAuthState();
     
     const sock = makeWASocket({
         auth: state,
@@ -65,7 +127,7 @@ async function startAgent() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
-        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (CONTEXT-AWARE DATABASE ARMED)!");
+        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (CLOUD AUTH & SILENT OBSERVER ACTIVE)!");
         if (connection === 'close') startAgent();
     });
 
@@ -90,12 +152,12 @@ async function startAgent() {
 
             if (fromMe && textMessage.toLowerCase().trim() === '.agent on') {
                 agentModeActive = true;
-                await sock.sendMessage(remoteJid, { text: "💼 *Agent Mode ON.*" });
+                await sock.sendMessage(remoteJid, { text: "💼 *Agent Mode ON.* I am taking over the conversation based on your recent context." });
                 continue;
             }
             if (fromMe && textMessage.toLowerCase().trim() === '.agent off') {
                 agentModeActive = false;
-                await sock.sendMessage(remoteJid, { text: "👋 *Agent Mode OFF.*" });
+                await sock.sendMessage(remoteJid, { text: "👋 *Agent Mode OFF.* I am now silently observing and taking notes." });
                 continue;
             }
 
@@ -126,10 +188,9 @@ async function startAgent() {
                 continue; 
             }
 
-            // 📩 2. PERSONAL DM ASSISTANT
-            if (!isGroup && agentModeActive) {
+            // 📩 2. PERSONAL DM ASSISTANT & SILENT OBSERVER
+            if (!isGroup) {
                 
-                // 📡 CLOUD FETCH: Pull user profile AND their chat history from the cloud
                 let userProfile;
                 try {
                     userProfile = await User.findOne({ remoteJid });
@@ -137,17 +198,19 @@ async function startAgent() {
                         userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] });
                     }
                 } catch (dbErr) {
-                    console.error("Database fetch failure, defaulting to safe state:", dbErr.message);
+                    console.error("Database fetch failure:", dbErr.message);
                     userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] });
                 }
 
-                // If this is a manual message from you (or a user message), we update the cloud history array
-                userProfile.chatHistory.push({ role: fromMe ? "assistant" : "user", content: textMessage || "[User sent an image]" });
-                if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift(); // Keep last 8 messages
+                const contentText = fromMe ? (textMessage || "[Toluwanimi sent an attachment]") : (textMessage || "[User sent an image]");
+                userProfile.chatHistory.push({ role: fromMe ? "assistant" : "user", content: contentText });
+                if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift(); 
 
-                // If the message is from you, we just save the history and stop. The AI doesn't need to reply to you.
-                if (fromMe) {
-                    try { await userProfile.save(); } catch (e) {}
+                try {
+                    if (typeof userProfile.save === 'function') await userProfile.save();
+                } catch (e) {}
+
+                if (!agentModeActive || fromMe) {
                     continue; 
                 }
 
@@ -164,10 +227,10 @@ async function startAgent() {
                             content: `
                             You are the highly advanced AI Executive Assistant to Toluwanimi. 
                             
-                            🚫 GLOBAL PROHIBITIONS (CRITICAL RULE - APPLIES TO ALL MODES):
+                            🚫 GLOBAL PROHIBITIONS (CRITICAL RULE):
                             - NEVER act like a customer service agent.
-                            - NEVER end your messages with phrases like "How can I help you?", "What can I do for you?", "Do you have any questions?", or "How may I assist you?". 
-                            - Always converse naturally as a human assistant. Just flow with the conversation.
+                            - NEVER end your messages with phrases like "How can I help you?", "What can I do for you?", or "Do you have any questions?". 
+                            - Always converse naturally as a human assistant.
                             
                             🧠 YOUR KNOWLEDGE BASE:
                             - Boss: Toluwanimi (A jovial, caring guy and a highly skilled Full Stack Developer).
@@ -180,19 +243,20 @@ async function startAgent() {
                             🕵️ HOW TO MEMORIZE:
                             If the user states a fact about themselves, append this to the END of your reply: [MEMORY: Fact goes here].
                             
+                            🕵️ GENDER RECONNAISSANCE PROTOCOL:
+                            - If the user's gender is unknown, use neutral terms ("my person", "boss"). Wait for them to use a gendered term to save it.
+
                             💳 PAYMENT VERIFICATION PROTOCOL:
-                            - If a user says they have transferred money, politely ask them to send the receipt as an image.
-                            - If the user sends an image, read it and say what you see. NEVER confirm the payment is fully successful; say Toluwanimi will confirm the alert.
+                            - Ask for receipt images. If sent, read them aloud but state Toluwanimi will confirm the alert on his end.
 
                             🎭 THE TRIPLE-THREAT CHAMELEON MATRIX:
                             MODE 1: RESPECT PROTOCOL (For elders/formal users). Always use "Sir/Ma".
                             MODE 2: BUSINESS PROTOCOL (For KukaPay/Dev services). Sharp and helpful.
-                            MODE 3: VIBE PROTOCOL (For peers/friends). Match their energy, use Pidgin. 
+                            MODE 3: VIBE PROTOCOL (For peers/friends). Match their energy, use Pidgin smoothly. 
                             ` 
                         }
                     ];
 
-                    // Inject the cloud-stored history into the AI's brain
                     openAiMessages.push(...userProfile.chatHistory);
 
                     if (isImageMessage) {
@@ -224,11 +288,9 @@ async function startAgent() {
                         replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
                     }
                     
-                    // Add the AI's reply to the cloud history
                     userProfile.chatHistory.push({ role: "assistant", content: replyText });
                     if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift();
 
-                    // 📡 CLOUD SAVE: Commit both new facts AND updated chat history to MongoDB
                     if (typeof userProfile.save === 'function') {
                         await userProfile.save();
                     }
