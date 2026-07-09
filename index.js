@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const express = require('express'); 
-const mongoose = require('mongoose'); // Added MongoDB ODM
+const mongoose = require('mongoose'); 
 
 const openai = new OpenAI({ 
     apiKey: process.env.OPENAI_API_KEY,
@@ -23,15 +23,15 @@ if (!mongoURI) {
         .catch(err => console.error("❌ MongoDB Connection Error:", err.message));
 }
 
-// 🗄️ DEFINE THE USER MEMORY SCHEMA
+// 🗄️ UPGRADED DATABASE SCHEMA (NOW INCLUDES CHAT HISTORY)
 const UserSchema = new mongoose.Schema({
     remoteJid: { type: String, required: true, unique: true },
-    knownFacts: { type: [String], default: [] }
+    knownFacts: { type: [String], default: [] },
+    chatHistory: { type: Array, default: [] } // <-- Short-Term Memory is now in the cloud!
 });
 const User = mongoose.model('User', UserSchema);
 
 let agentModeActive = true; 
-const chatHistory = {}; 
 
 function convertAudio(inputPath, outputPath) {
     return new Promise((resolve, reject) => {
@@ -65,7 +65,7 @@ async function startAgent() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
-        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (CLOUD DATABASE ARMED)!");
+        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (CONTEXT-AWARE DATABASE ARMED)!");
         if (connection === 'close') startAgent();
     });
 
@@ -126,27 +126,32 @@ async function startAgent() {
                 continue; 
             }
 
-            if (!isGroup) {
-                if (!chatHistory[remoteJid]) chatHistory[remoteJid] = [];
-                chatHistory[remoteJid].push({ role: fromMe ? "assistant" : "user", content: textMessage || "[User sent an image]" });
-                if (chatHistory[remoteJid].length > 6) chatHistory[remoteJid].shift();
-            }
-
             // 📩 2. PERSONAL DM ASSISTANT
-            if (!isGroup && agentModeActive && !fromMe) {
-                console.log(`🎯 Processing DM for ${remoteJid}...`);
+            if (!isGroup && agentModeActive) {
                 
-                // 📡 CLOUD FETCH: Pull user profile from permanent database asynchronously
+                // 📡 CLOUD FETCH: Pull user profile AND their chat history from the cloud
                 let userProfile;
                 try {
                     userProfile = await User.findOne({ remoteJid });
                     if (!userProfile) {
-                        userProfile = new User({ remoteJid, knownFacts: [] });
+                        userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] });
                     }
                 } catch (dbErr) {
                     console.error("Database fetch failure, defaulting to safe state:", dbErr.message);
-                    userProfile = { knownFacts: [] };
+                    userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] });
                 }
+
+                // If this is a manual message from you (or a user message), we update the cloud history array
+                userProfile.chatHistory.push({ role: fromMe ? "assistant" : "user", content: textMessage || "[User sent an image]" });
+                if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift(); // Keep last 8 messages
+
+                // If the message is from you, we just save the history and stop. The AI doesn't need to reply to you.
+                if (fromMe) {
+                    try { await userProfile.save(); } catch (e) {}
+                    continue; 
+                }
+
+                console.log(`🎯 Processing DM for ${remoteJid}...`);
 
                 let memoryString = userProfile.knownFacts.length > 0 
                     ? userProfile.knownFacts.map(f => "- " + f).join('\n') 
@@ -159,6 +164,11 @@ async function startAgent() {
                             content: `
                             You are the highly advanced AI Executive Assistant to Toluwanimi. 
                             
+                            🚫 GLOBAL PROHIBITIONS (CRITICAL RULE - APPLIES TO ALL MODES):
+                            - NEVER act like a customer service agent.
+                            - NEVER end your messages with phrases like "How can I help you?", "What can I do for you?", "Do you have any questions?", or "How may I assist you?". 
+                            - Always converse naturally as a human assistant. Just flow with the conversation.
+                            
                             🧠 YOUR KNOWLEDGE BASE:
                             - Boss: Toluwanimi (A jovial, caring guy and a highly skilled Full Stack Developer).
                             - Company: KukaPay (Fintech app, crypto-to-cash, vendor payments).
@@ -170,21 +180,20 @@ async function startAgent() {
                             🕵️ HOW TO MEMORIZE:
                             If the user states a fact about themselves, append this to the END of your reply: [MEMORY: Fact goes here].
                             
-                            💳 PAYMENT VERIFICATION PROTOCOL (CRITICAL):
+                            💳 PAYMENT VERIFICATION PROTOCOL:
                             - If a user says they have transferred money, politely ask them to send the receipt as an image.
-                            - If the user sends an image, carefully read the text on it. 
-                            - Tell them what you see (e.g., "I can see the receipt for ₦X from [Name]").
-                            - NEVER confirm the payment is fully successful. ALWAYS conclude by saying Toluwanimi will confirm the alert on his end before proceeding.
+                            - If the user sends an image, read it and say what you see. NEVER confirm the payment is fully successful; say Toluwanimi will confirm the alert.
 
                             🎭 THE TRIPLE-THREAT CHAMELEON MATRIX:
                             MODE 1: RESPECT PROTOCOL (For elders/formal users). Always use "Sir/Ma".
                             MODE 2: BUSINESS PROTOCOL (For KukaPay/Dev services). Sharp and helpful.
-                            MODE 3: VIBE PROTOCOL (For peers/friends). Match their energy, use Pidgin. NEVER act like customer service.
+                            MODE 3: VIBE PROTOCOL (For peers/friends). Match their energy, use Pidgin. 
                             ` 
                         }
                     ];
 
-                    openAiMessages.push(...chatHistory[remoteJid]);
+                    // Inject the cloud-stored history into the AI's brain
+                    openAiMessages.push(...userProfile.chatHistory);
 
                     if (isImageMessage) {
                         console.log("📸 Downloading image for AI analysis...");
@@ -208,19 +217,21 @@ async function startAgent() {
                     let replyText = completion.choices[0].message.content;
 
                     const memoryMatch = replyText.match(/\[MEMORY:(.*?)\]/i);
-                    if (memoryMatch && typeof userProfile.save === 'function') {
+                    if (memoryMatch) {
                         const newFact = memoryMatch[1].trim();
                         userProfile.knownFacts.push(newFact);
-                        
-                        // 📡 CLOUD SAVE: Commit facts natively to the cloud
-                        await userProfile.save();
                         console.log(`\n💾 PERMANENT MEMORY CLOUD SAVED: ${newFact}\n`);
-                        
                         replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
                     }
                     
-                    chatHistory[remoteJid].push({ role: "assistant", content: replyText });
-                    if (chatHistory[remoteJid].length > 6) chatHistory[remoteJid].shift();
+                    // Add the AI's reply to the cloud history
+                    userProfile.chatHistory.push({ role: "assistant", content: replyText });
+                    if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift();
+
+                    // 📡 CLOUD SAVE: Commit both new facts AND updated chat history to MongoDB
+                    if (typeof userProfile.save === 'function') {
+                        await userProfile.save();
+                    }
 
                     await sock.sendMessage(remoteJid, { text: replyText });
                 } catch (err) {
