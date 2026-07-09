@@ -12,11 +12,9 @@ const openai = new OpenAI({
     maxRetries: 3     
 });
 
-// 🔥 ON by default to prevent amnesia
 let agentModeActive = true; 
 const chatHistory = {}; 
 
-// 🗄️ LEVEL 1: LONG-TERM MEMORY DATABASE
 const dbPath = path.join(__dirname, 'users.json');
 
 function loadUsers() {
@@ -62,7 +60,8 @@ async function startAgent() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
-        if (connection === 'open') console.log('🚀 TOLUWANIMI\\'S KUKATAI AGENT (MEMORY EVOLUTION) IS LIVE!');
+        // The syntax error here is completely fixed!
+        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT (MEMORY EVOLUTION) IS LIVE!");
         if (connection === 'close') startAgent();
     });
 
@@ -96,19 +95,16 @@ async function startAgent() {
 
             if (isStatus || isNewsletter || !textMessage || isGroup) continue;
 
-            // 🧠 SHORT-TERM MEMORY UPDATE
             if (!chatHistory[remoteJid]) chatHistory[remoteJid] = [];
             chatHistory[remoteJid].push({ role: fromMe ? "assistant" : "user", content: textMessage });
             if (chatHistory[remoteJid].length > 6) chatHistory[remoteJid].shift();
 
-            // 📩 PERSONAL DM ASSISTANT (WITH LONG-TERM MEMORY)
             if (agentModeActive && !fromMe) {
                 console.log(`🎯 Processing DM for ${remoteJid}...`);
                 
-                // Load this specific user's profile
                 let userProfile = usersDB[remoteJid] || { knownFacts: [] };
                 let memoryString = userProfile.knownFacts.length > 0 
-                    ? userProfile.knownFacts.map(f => "- " + f).join('\\n') 
+                    ? userProfile.knownFacts.map(f => "- " + f).join('\n') 
                     : "- No facts known yet.";
 
                 try {
@@ -148,18 +144,16 @@ async function startAgent() {
 
                     let replyText = completion.choices[0].message.content;
 
-                    // 🕵️ INTERCEPT & EXTRACT THE HIDDEN MEMORY TAG
-                    const memoryMatch = replyText.match(/\\[MEMORY:(.*?)\\]/i);
+                    const memoryMatch = replyText.match(/\[MEMORY:(.*?)\]/i);
                     if (memoryMatch) {
                         const newFact = memoryMatch[1].trim();
                         userProfile.knownFacts.push(newFact);
                         usersDB[remoteJid] = userProfile;
-                        saveUsers(usersDB); // Save to the database file
+                        saveUsers(usersDB);
                         
-                        console.log(`\\n💾 NEW MEMORY SAVED: ${newFact}\\n`);
+                        console.log(`\n💾 NEW MEMORY SAVED: ${newFact}\n`);
                         
-                        // Delete the tag so the user doesn't see it!
-                        replyText = replyText.replace(/\\[MEMORY:.*?\\]/i, '').trim();
+                        replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
                     }
                     
                     chatHistory[remoteJid].push({ role: "assistant", content: replyText });
