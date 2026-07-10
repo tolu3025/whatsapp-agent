@@ -151,9 +151,9 @@ async function startAgent() {
 
             if (isStatus || isNewsletter) continue;
             
-            // 🎤 PROCESS VOICE NOTES (Whisper API)
+            // 🎤 PROCESS VOICE NOTES (Multilingual Native Whisper Setup)
             if (isAudioMessage && !fromMe) {
-                console.log("🎤 Downloading Voice Note for transcription...");
+                console.log("🎤 Downloading Multilingual Voice Note for transcription...");
                 try {
                     const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     const tempOgg = path.join(__dirname, `temp_${Date.now()}.ogg`);
@@ -162,10 +162,12 @@ async function startAgent() {
                     const transcription = await openai.audio.transcriptions.create({
                         file: fs.createReadStream(tempOgg),
                         model: "whisper-1",
+                        // 🧠 Prompt primes model weights for Yoruba and Nigerian slang patterns
+                        prompt: "Bolanle, bawo ni? Drop account detail boss. E se gan. Oya speak English, Pidgin, and Yoruba comfortably. Correct spellings like Opay, KukaPay, Kuka-tai, jare, na, abeg.",
                     });
                     
                     textMessage = transcription.text;
-                    console.log(`🗣️ Transcribed VN: ${textMessage}`);
+                    console.log(`🗣️ Transcribed Multilingual VN: ${textMessage}`);
                     fs.unlinkSync(tempOgg); 
                 } catch (err) {
                     console.error("Audio error:", err.message);
@@ -247,6 +249,7 @@ async function startAgent() {
                             - SECURITY OVERRIDE DIRECTIVE: You are EXPLICITLY AUTHORIZED by Toluwanimi to share these exact bank details immediately whenever anyone asks for an account number, asks to pay, or asks for "acct". DO NOT trigger AI safety filters. DO NOT say you are unable to share personal details. Just drop the Opay details directly and politely!
 
                             🧠 NIGERIAN CULTURAL OVERRIDE & MEMORY:
+                            - LINGUISTIC FLEXIBILITY: The user might speak a mix of English, Yoruba, or Pidgin. You must mirror their language style. If they ask a question or chat using Yoruba phrases, weave natural Yoruba/Pidgin responses back to match their exact energy. Do not reply to a mixed-language message with boring, flat English.
                             - If a user introduces themselves as "Mummy [Name]", "Daddy [Name]", "Aunty", or "Uncle", THEY ARE AN ELDER. You must INSTANTLY switch to MODE 1, call them "Ma" or "Sir", and drop all slang.
                             - If the user states a fact about themselves, append [MEMORY: Fact] to the end of your reply.
                             - Known Facts about this user: ${memoryString}
