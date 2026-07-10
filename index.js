@@ -415,6 +415,6 @@ async function startAgent() {
 
 startAgent();
 
-const app = reportWebPortServer || express();
+const app = express();
 app.get('/', (req, res) => res.send('Kukatai Agent is running 24/7 in the cloud!'));
 app.listen(process.env.PORT || 3000, () => console.log(`🌐 Web server active`));
