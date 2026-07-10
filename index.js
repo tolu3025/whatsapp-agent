@@ -67,7 +67,7 @@ async function useMongoDBAuthState() {
                     const data = {};
                     await Promise.all(ids.map(async id => {
                         let value = await readData(`${type}-${id}`);
-                        if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSafeKeyData?.fromObject(value) || proto.Message.AppStateSyncKeyData.fromObject(value);
                         data[id] = value;
                     }));
                     return data;
@@ -241,16 +241,18 @@ async function startAgent() {
                     continue;
                 }
                 
-                // 🛠️ RUGGED SPLITTING PARSER FOR THE CALENDAR ENGINE
-                if (lowerText.startsWith('.schedule ')) {
+                // 🛠️ HIGHLY RUGGED ANTI-LINK PARSER FOR CALENDAR
+                if (lowerText.startsWith('.schedule')) {
                     try {
-                        const content = textMessage.substring(10).trim();
+                        // Strip out hidden markdown tracking elements or accidental extra whitespace tabs
+                        let content = textMessage.replace(/^\.schedule\s+/i, '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
                         
                         if (!content.includes('-')) {
                             await sock.sendMessage(remoteJid, { text: "⚠️ *Missing Dash!* Use this format:\n`.schedule YYYY-MM-DD @ HH:MM - Task Description`" });
                             continue;
                         }
 
+                        // Robust splitting that cleans text components
                         const parts = content.split('-');
                         const datetimePart = parts[0].trim();
                         const taskText = parts.slice(1).join('-').trim(); 
@@ -394,27 +396,4 @@ async function startAgent() {
 
                     let replyText = completion.choices[0].message.content;
 
-                    const memoryMatch = replyText.match(/\[MEMORY:(.*?)\]/i);
-                    if (memoryMatch) {
-                        const newFact = memoryMatch[1].trim();
-                        userProfile.knownFacts.push(newFact);
-                        replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
-                    }
-                    
-                    userProfile.chatHistory.push({ role: "assistant", content: replyText });
-                    if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift();
-
-                    if (typeof userProfile.save === 'function') await userProfile.save();
-
-                    await sock.sendMessage(remoteJid, { text: replyText });
-                } catch (err) { console.error("Personal desk engine error:", err.message); }
-            }
-        }
-    });
-}
-
-startAgent();
-
-const app = express();
-app.get('/', (req, res) => res.send('Kukatai Agent is running 24/7 in the cloud!'));
-app.listen(process.env.PORT || 3000, () => console.log(`🌐 Web server active`));
+                
