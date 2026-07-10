@@ -104,7 +104,6 @@ async function fetchLiveNigeriaNews() {
         }
         return "No breaking stories found in the last couple hours.";
     } catch (err) {
-        console.error("Live news pull failed, returning fallback context:", err.message);
         return "Standard macro momentum: Tech ecosystem trends shifting toward utility scaling; policy adjustments continuing.";
     }
 }
@@ -137,7 +136,6 @@ function startProactiveAutomationClocks(sock) {
 
     // 🕒 2. Periodic 4-Hour News Pulse (Fires every 4 hours)
     cron.schedule('0 */4 * * *', async () => {
-        console.log("🕒 Running 4-hour live news heartbeat ticker...");
         const rawNews = await fetchLiveNigeriaNews();
         try {
             const completion = await openai.chat.completions.create({
@@ -200,7 +198,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL AUTOMATION RUNNERS LOADED)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL RADARS ACTIVE)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -226,10 +224,10 @@ async function startAgent() {
                                 msg.message.imageMessage?.caption ||
                                 "";
 
+            const lowerText = textMessage.toLowerCase().trim();
+
             // 🛠️ DEFENSIVE INTERNAL COMMAND HANDLING
             if (fromMe && !isGroup) {
-                const lowerText = textMessage.toLowerCase().trim();
-                
                 if (lowerText === '.agent on') {
                     agentModeActive = true;
                     await sock.sendMessage(remoteJid, { text: "💼 *Agent Mode ON.*" });
@@ -241,49 +239,40 @@ async function startAgent() {
                     continue;
                 }
                 
-                // 🧠 ULTRA-BULLETPROOF: OpenAI-Powered Schedule Schema-Forced Parser
+                // 🛠️ REWRITTEN: Ultra-Forgiving String Position Index Scanner
                 if (lowerText.startsWith('.schedule')) {
                     try {
-                        console.log("Parsing schedule via OpenAI to bypass formatting artifacts...");
-                        
-                        const completion = await openai.chat.completions.create({
-                            model: "gpt-4o-mini",
-                            response_format: { type: "json_object" },
-                            messages: [
-                                {
-                                    role: "system",
-                                    content: `You are a structured data extraction utility. Extract scheduling details from the input string. 
-                                    Return a strictly structured JSON object with exactly three keys: 
-                                    "date" (formatted strictly as YYYY-MM-DD), 
-                                    "time" (formatted strictly as HH:MM in 24-hour format), 
-                                    and "task" (the clean text description of the event).
-                                    
-                                    Current date context is Saturday, July 11, 2026. If the input contains implicit or relative words, extrapolate it correctly to match this context.`
-                                },
-                                { role: "user", content: textMessage }
-                            ]
-                        });
+                        // Completely strip out WhatsApp's hidden char payloads and links
+                        let cleanText = textMessage.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
 
-                        const data = JSON.parse(completion.choices[0].message.content);
-                        
-                        if (data.date && data.time && data.task) {
-                            const newEvent = new Schedule({ 
-                                task: data.task, 
-                                date: data.date, 
-                                time: data.time 
-                            });
+                        if (!cleanText.includes('@') || !cleanText.includes('-')) {
+                            await sock.sendMessage(remoteJid, { text: "⚠️ *Format Error!* Make sure you use both the `@` symbol and the `-` dash:\n\n`.schedule YYYY-MM-DD @ HH:MM - Description`" });
+                            continue;
+                        }
+
+                        // Parse boundaries safely based on structural anchors
+                        const atIndex = cleanText.indexOf('@');
+                        const dashIndex = cleanText.indexOf('-');
+
+                        // Extract and isolate individual fields safely
+                        const rawDate = cleanText.substring(9, atIndex).replace(/[^0-9-]/g, '').trim(); // Only leaves numbers and hyphens
+                        const rawTime = cleanText.substring(atIndex + 1, dashIndex).replace(/[^0-9:]/g, '').trim(); // Only leaves numbers and colons
+                        const taskText = cleanText.substring(dashIndex + 1).trim();
+
+                        if (rawDate.length >= 8 && rawTime.length >= 4 && taskText.length > 0) {
+                            const newEvent = new Schedule({ task: taskText, date: rawDate, time: rawTime });
                             await newEvent.save();
                             
                             await sock.sendMessage(remoteJid, { 
-                                text: `✅ *Event Scheduled Via AI!*\n\n📅 *Date:* ${data.date}\n🕒 *Time:* ${data.time}\n📌 *Task:* ${data.task}` 
+                                text: `✅ *Event Scheduled!* Cloud logged event details:\n\n📅 *Date:* ${rawDate}\n🕒 *Time:* ${rawTime}\n📌 *Task:* ${taskText}` 
                             });
                         } else {
-                            await sock.sendMessage(remoteJid, { text: "❌ *Parsing Error:* AI parameters missed valid extraction boundaries." });
+                            await sock.sendMessage(remoteJid, { text: "❌ *Parsing Failed.* Could not extract clear time or date boundaries. Try typing it plainly." });
                         }
                     } catch (err) {
-                        console.error("AI Scheduler parser structural failure:", err.message);
+                        console.error("Scheduler crash prevented:", err.message);
                     }
-                    continue; 
+                    continue; // Lock the execution frame so it never reaches the AI loop
                 }
             }
 
@@ -335,6 +324,9 @@ async function startAgent() {
 
             // 📩 2. PERSONAL DM ASSISTANT & SILENT OBSERVER
             if (!isGroup) {
+                // Ignore any message that starts with a dot if it leaked past command layer to prevent AI echo loops
+                if (textMessage.startsWith('.')) continue;
+
                 let userProfile;
                 try {
                     userProfile = await User.findOne({ remoteJid });
