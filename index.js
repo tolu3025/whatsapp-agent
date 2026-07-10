@@ -6,7 +6,7 @@ const path = require('path');
 const express = require('express'); 
 const mongoose = require('mongoose'); 
 const cron = require('node-cron'); 
-const axios = require('axios'); // 📡 Live web requests package
+const axios = require('axios'); 
 
 const openai = new OpenAI({ 
     apiKey: process.env.OPENAI_API_KEY,
@@ -38,11 +38,10 @@ const AuthSchema = new mongoose.Schema({
 });
 const Auth = mongoose.model('Auth', AuthSchema);
 
-// Upgraded Schedule Schema to accept exact times
 const ScheduleSchema = new mongoose.Schema({
     task: { type: String, required: true },
-    date: { type: String, required: true }, // YYYY-MM-DD
-    time: { type: String, required: true }, // HH:MM (24-hour format, e.g., 14:00)
+    date: { type: String, required: true }, 
+    time: { type: String, required: true }, 
     alertSent: { type: Boolean, default: false }
 });
 const Schedule = mongoose.model('Schedule', ScheduleSchema);
@@ -99,9 +98,7 @@ async function fetchLiveNigeriaNews() {
         const apiKey = process.env.NEWS_API_KEY;
         if (!apiKey) return "No News API key set. Displaying macro updates instead.";
         
-        // Pulling dynamic business and tech streams targeting Nigeria
         const response = await axios.get(`https://newsapi.org/v2/everything?q=Nigeria+AND+(tech+OR+business+OR+fintech)&sortBy=publishedAt&pageSize=5&apiKey=${apiKey}`);
-        
         if (response.data && response.data.articles.length > 0) {
             return response.data.articles.map((art, i) => `[Headline ${i+1}]: ${art.title} - ${art.description || ''}`).join('\n\n');
         }
@@ -161,7 +158,6 @@ function startProactiveAutomationClocks(sock) {
         
         const dateStr = lagosTime.toISOString().split('T')[0];
         
-        // Calculate the exact target time 30 minutes from now
         lagosTime.setMinutes(lagosTime.getMinutes() + 30);
         const targetHours = String(lagosTime.getHours()).padStart(2, '0');
         const targetMinutes = String(lagosTime.getMinutes()).padStart(2, '0');
@@ -204,7 +200,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL AUTOMATION RADARS ACTIVE)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL RADARS LOADED)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -230,7 +226,7 @@ async function startAgent() {
                                 msg.message.imageMessage?.caption ||
                                 "";
 
-            // 🛠️ INTERNAL COMMAND HANDLING FOR YOUR DM WINDOW
+            // 🛠️ DEFENSIVE INTERNAL COMMAND HANDLING
             if (fromMe && !isGroup) {
                 const lowerText = textMessage.toLowerCase().trim();
                 
@@ -245,23 +241,36 @@ async function startAgent() {
                     continue;
                 }
                 
-                // Enhanced Scheduler Syntax: `.schedule YYYY-MM-DD @ HH:MM - Details`
+                // 🛠️ RUGGED SPLITTING PARSER FOR THE CALENDAR ENGINE
                 if (lowerText.startsWith('.schedule ')) {
                     try {
                         const content = textMessage.substring(10).trim();
+                        
+                        if (!content.includes('-')) {
+                            await sock.sendMessage(remoteJid, { text: "⚠️ *Missing Dash!* Use this format:\n`.schedule YYYY-MM-DD @ HH:MM - Task Description`" });
+                            continue;
+                        }
+
                         const parts = content.split('-');
                         const datetimePart = parts[0].trim();
-                        const taskText = parts[1].trim();
+                        const taskText = parts.slice(1).join('-').trim(); 
                         
+                        if (!datetimePart.includes('@')) {
+                            await sock.sendMessage(remoteJid, { text: "⚠️ *Missing @ symbol for time!* Use this format:\n`.schedule YYYY-MM-DD @ HH:MM - Task Description`" });
+                            continue;
+                        }
+
                         const datetimeSplit = datetimePart.split('@');
                         const rawDate = datetimeSplit[0].trim();
-                        const rawTime = datetimeSplit[1].trim(); // e.g. 14:30
+                        const rawTime = datetimeSplit[1].trim(); 
                         
                         const newEvent = new Schedule({ task: taskText, date: rawDate, time: rawTime });
                         await newEvent.save();
-                        await sock.sendMessage(remoteJid, { text: `✅ *Event Scheduled!* Cloud logged event on ${rawDate} at ${rawTime}.` });
+                        
+                        await sock.sendMessage(remoteJid, { text: `✅ *Event Scheduled!* Cloud logged event on *${rawDate}* at *${rawTime}*.\n\n👉 _${taskText}_` });
                     } catch (err) {
-                        await sock.sendMessage(remoteJid, { text: "❌ *Syntax Failure.* Use standard notation:\n`.schedule YYYY-MM-DD @ HH:MM - Task Description`" });
+                        console.error("Scheduler parsing crash prevented:", err.message);
+                        await sock.sendMessage(remoteJid, { text: `❌ *System Error:* Failed to log your task.` });
                     }
                     continue;
                 }
@@ -397,4 +406,15 @@ async function startAgent() {
 
                     if (typeof userProfile.save === 'function') await userProfile.save();
 
-                    await sock.sendMess
+                    await sock.sendMessage(remoteJid, { text: replyText });
+                } catch (err) { console.error("Personal desk engine error:", err.message); }
+            }
+        }
+    });
+}
+
+startAgent();
+
+const app = reportWebPortServer || express();
+app.get('/', (req, res) => res.send('Kukatai Agent is running 24/7 in the cloud!'));
+app.listen(process.env.PORT || 3000, () => console.log(`🌐 Web server active`));
