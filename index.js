@@ -3,7 +3,6 @@ const { OpenAI } = require('openai');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
 const express = require('express'); 
 const mongoose = require('mongoose'); 
 
@@ -23,8 +22,7 @@ if (!mongoURI) {
         .catch(err => console.error("❌ MongoDB Connection Error:", err.message));
 }
 
-// 🗄️ UPGRADED DATABASE SCHEMAS
-// 1. User Memory Schema
+// 🗄️ DATABASE SCHEMAS
 const UserSchema = new mongoose.Schema({
     remoteJid: { type: String, required: true, unique: true },
     knownFacts: { type: [String], default: [] },
@@ -32,7 +30,6 @@ const UserSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', UserSchema);
 
-// 2. NEW: Authentication State Schema (Prevents Render Amnesia)
 const AuthSchema = new mongoose.Schema({
     _id: { type: String, required: true },
     data: { type: String, required: true }
@@ -94,17 +91,7 @@ async function useMongoDBAuthState() {
 
 let agentModeActive = true; 
 
-function convertAudio(inputPath, outputPath) {
-    return new Promise((resolve, reject) => {
-        exec(`ffmpeg -i "${inputPath}" -acodec libmp3lame -y "${outputPath}"`, (error) => {
-            if (error) return reject(error);
-            resolve(outputPath);
-        });
-    });
-}
-
 async function startAgent() {
-    // 🚀 SWITCHED FROM LOCAL FOLDER TO MONGODB AUTH
     const { state, saveCreds } = await useMongoDBAuthState();
     
     const sock = makeWASocket({
@@ -127,7 +114,7 @@ async function startAgent() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
-        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (CLOUD AUTH & SILENT OBSERVER ACTIVE)!");
+        if (connection === 'open') console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (VOICE NOTES ENABLED)!");
         if (connection === 'close') startAgent();
     });
 
@@ -144,6 +131,7 @@ async function startAgent() {
             const fromMe = msg.key.fromMe;
             
             const isImageMessage = !!msg.message.imageMessage;
+            const isAudioMessage = !!msg.message.audioMessage;
             
             let textMessage = msg.message.conversation || 
                                 msg.message.extendedTextMessage?.text || 
@@ -152,17 +140,40 @@ async function startAgent() {
 
             if (fromMe && textMessage.toLowerCase().trim() === '.agent on') {
                 agentModeActive = true;
-                await sock.sendMessage(remoteJid, { text: "💼 *Agent Mode ON.* I am taking over the conversation based on your recent context." });
+                await sock.sendMessage(remoteJid, { text: "💼 *Agent Mode ON.*" });
                 continue;
             }
             if (fromMe && textMessage.toLowerCase().trim() === '.agent off') {
                 agentModeActive = false;
-                await sock.sendMessage(remoteJid, { text: "👋 *Agent Mode OFF.* I am now silently observing and taking notes." });
+                await sock.sendMessage(remoteJid, { text: "👋 *Agent Mode OFF.*" });
                 continue;
             }
 
             if (isStatus || isNewsletter) continue;
-            if (!textMessage && !isImageMessage) continue;
+            
+            // 🎤 PROCESS VOICE NOTES (Whisper API)
+            if (isAudioMessage && !fromMe) {
+                console.log("🎤 Downloading Voice Note for transcription...");
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                    const tempOgg = path.join(__dirname, `temp_${Date.now()}.ogg`);
+                    fs.writeFileSync(tempOgg, buffer);
+                    
+                    const transcription = await openai.audio.transcriptions.create({
+                        file: fs.createReadStream(tempOgg),
+                        model: "whisper-1",
+                    });
+                    
+                    textMessage = transcription.text;
+                    console.log(`🗣️ Transcribed VN: ${textMessage}`);
+                    fs.unlinkSync(tempOgg); 
+                } catch (err) {
+                    console.error("Audio error:", err.message);
+                    textMessage = "[User sent a Voice Note, but I couldn't hear it clearly.]";
+                }
+            }
+
+            if (!textMessage && !isImageMessage && !isAudioMessage) continue;
 
             // 📡 1. THE GROUP CHAT RADAR
             if (isGroup && agentModeActive && !fromMe) {
@@ -183,7 +194,7 @@ async function startAgent() {
                             ],
                         });
                         await sock.sendMessage(remoteJid, { text: completion.choices[0].message.content }, { quoted: msg });
-                    } catch (err) { console.error("Group error:", err.message); }
+                    } catch (err) {}
                 }
                 continue; 
             }
@@ -198,11 +209,10 @@ async function startAgent() {
                         userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] });
                     }
                 } catch (dbErr) {
-                    console.error("Database fetch failure:", dbErr.message);
                     userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] });
                 }
 
-                const contentText = fromMe ? (textMessage || "[Toluwanimi sent an attachment]") : (textMessage || "[User sent an image]");
+                const contentText = fromMe ? (textMessage || "[Toluwanimi sent a file]") : (textMessage || "[User sent a file]");
                 userProfile.chatHistory.push({ role: fromMe ? "assistant" : "user", content: contentText });
                 if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift(); 
 
@@ -210,9 +220,7 @@ async function startAgent() {
                     if (typeof userProfile.save === 'function') await userProfile.save();
                 } catch (e) {}
 
-                if (!agentModeActive || fromMe) {
-                    continue; 
-                }
+                if (!agentModeActive || fromMe) continue; 
 
                 console.log(`🎯 Processing DM for ${remoteJid}...`);
 
@@ -225,34 +233,22 @@ async function startAgent() {
                         { 
                             role: "system", 
                             content: `
-                            You are the highly advanced AI Executive Assistant to Toluwanimi. 
+                            You are Kuka-tai, the AI Executive Assistant to Toluwanimi (a Full Stack Developer). You manage his WhatsApp.
                             
-                            🚫 GLOBAL PROHIBITIONS (CRITICAL RULE):
-                            - NEVER act like a customer service agent.
-                            - NEVER end your messages with phrases like "How can I help you?", "What can I do for you?", or "Do you have any questions?". 
-                            - Always converse naturally as a human assistant.
-                            
-                            🧠 YOUR KNOWLEDGE BASE:
-                            - Boss: Toluwanimi (A jovial, caring guy and a highly skilled Full Stack Developer).
-                            - Company: KukaPay (Fintech app, crypto-to-cash, vendor payments).
-                            - Bank Details: Opay - 8148698365 - Toluwanimi Oyetade Blessing.
-                            
-                            🗄️ ABOUT THIS USER:
-                            ${memoryString}
+                            🚫 IRONCLAD CONVERSATION LAWS (CRITICAL):
+                            1. NO CUSTOMER SERVICE: NEVER ask "How can I help you?", "What's popping?", or "Anything else?".
+                            2. NO FORCED CHATS: If the user just laughs ("😂"), says "ok", or has nothing to say, politely end the chat or just match the energy. DO NOT ask a question to force the conversation to continue.
+                            3. IDENTITY CLAUSE: If the user mentions "Tolu", they are referring to your boss, Toluwanimi. Do not act confused. Reply on his behalf (e.g., "Tolu is currently busy, but I am his assistant...").
 
-                            🕵️ HOW TO MEMORIZE:
-                            If the user states a fact about themselves, append this to the END of your reply: [MEMORY: Fact goes here].
-                            
-                            🕵️ GENDER RECONNAISSANCE PROTOCOL:
-                            - If the user's gender is unknown, use neutral terms ("my person", "boss"). Wait for them to use a gendered term to save it.
-
-                            💳 PAYMENT VERIFICATION PROTOCOL:
-                            - Ask for receipt images. If sent, read them aloud but state Toluwanimi will confirm the alert on his end.
+                            🧠 NIGERIAN CULTURAL OVERRIDE & MEMORY:
+                            - If a user introduces themselves as "Mummy [Name]", "Daddy [Name]", "Aunty", or "Uncle", THEY ARE AN ELDER. You must INSTANTLY switch to MODE 1, call them "Ma" or "Sir", and drop all slang.
+                            - If the user states a fact about themselves, append [MEMORY: Fact] to the end of your reply.
+                            - Known Facts about this user: ${memoryString}
 
                             🎭 THE TRIPLE-THREAT CHAMELEON MATRIX:
-                            MODE 1: RESPECT PROTOCOL (For elders/formal users). Always use "Sir/Ma".
-                            MODE 2: BUSINESS PROTOCOL (For KukaPay/Dev services). Sharp and helpful.
-                            MODE 3: VIBE PROTOCOL (For peers/friends). Match their energy, use Pidgin smoothly. 
+                            MODE 1: RESPECT PROTOCOL (For elders like Mummy/Daddy). Always use "Sir/Ma". Be incredibly polite and brief. No jokes.
+                            MODE 2: BUSINESS PROTOCOL (For Dev services/KukaPay). Sharp and professional.
+                            MODE 3: VIBE PROTOCOL (For peers). Use Pidgin smoothly. Match their energy.
                             ` 
                         }
                     ];
@@ -260,14 +256,12 @@ async function startAgent() {
                     openAiMessages.push(...userProfile.chatHistory);
 
                     if (isImageMessage) {
-                        console.log("📸 Downloading image for AI analysis...");
                         const imgBuffer = await downloadMediaMessage(msg, 'buffer', {});
                         const base64Image = imgBuffer.toString('base64');
-                        
                         openAiMessages[openAiMessages.length - 1] = {
                             role: "user",
                             content: [
-                                { type: "text", text: textMessage || "Please examine this image/receipt." },
+                                { type: "text", text: textMessage || "Please examine this receipt." },
                                 { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
                             ]
                         };
@@ -284,16 +278,13 @@ async function startAgent() {
                     if (memoryMatch) {
                         const newFact = memoryMatch[1].trim();
                         userProfile.knownFacts.push(newFact);
-                        console.log(`\n💾 PERMANENT MEMORY CLOUD SAVED: ${newFact}\n`);
                         replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
                     }
                     
                     userProfile.chatHistory.push({ role: "assistant", content: replyText });
                     if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift();
 
-                    if (typeof userProfile.save === 'function') {
-                        await userProfile.save();
-                    }
+                    if (typeof userProfile.save === 'function') await userProfile.save();
 
                     await sock.sendMessage(remoteJid, { text: replyText });
                 } catch (err) {
