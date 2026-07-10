@@ -67,7 +67,7 @@ async function useMongoDBAuthState() {
                     const data = {};
                     await Promise.all(ids.map(async id => {
                         let value = await readData(`${type}-${id}`);
-                        if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSafeKeyData?.fromObject(value) || proto.Message.AppStateSyncKeyData.fromObject(value);
+                        if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSyncKeyData.fromObject(value);
                         data[id] = value;
                     }));
                     return data;
@@ -200,7 +200,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL RADARS LOADED)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL AUTOMATION RUNNERS LOADED)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -241,40 +241,49 @@ async function startAgent() {
                     continue;
                 }
                 
-                // 🛠️ HIGHLY RUGGED ANTI-LINK PARSER FOR CALENDAR
+                // 🧠 ULTRA-BULLETPROOF: OpenAI-Powered Schedule Schema-Forced Parser
                 if (lowerText.startsWith('.schedule')) {
                     try {
-                        // Strip out hidden markdown tracking elements or accidental extra whitespace tabs
-                        let content = textMessage.replace(/^\.schedule\s+/i, '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+                        console.log("Parsing schedule via OpenAI to bypass formatting artifacts...");
                         
-                        if (!content.includes('-')) {
-                            await sock.sendMessage(remoteJid, { text: "⚠️ *Missing Dash!* Use this format:\n`.schedule YYYY-MM-DD @ HH:MM - Task Description`" });
-                            continue;
-                        }
+                        const completion = await openai.chat.completions.create({
+                            model: "gpt-4o-mini",
+                            response_format: { type: "json_object" },
+                            messages: [
+                                {
+                                    role: "system",
+                                    content: `You are a structured data extraction utility. Extract scheduling details from the input string. 
+                                    Return a strictly structured JSON object with exactly three keys: 
+                                    "date" (formatted strictly as YYYY-MM-DD), 
+                                    "time" (formatted strictly as HH:MM in 24-hour format), 
+                                    and "task" (the clean text description of the event).
+                                    
+                                    Current date context is Saturday, July 11, 2026. If the input contains implicit or relative words, extrapolate it correctly to match this context.`
+                                },
+                                { role: "user", content: textMessage }
+                            ]
+                        });
 
-                        // Robust splitting that cleans text components
-                        const parts = content.split('-');
-                        const datetimePart = parts[0].trim();
-                        const taskText = parts.slice(1).join('-').trim(); 
+                        const data = JSON.parse(completion.choices[0].message.content);
                         
-                        if (!datetimePart.includes('@')) {
-                            await sock.sendMessage(remoteJid, { text: "⚠️ *Missing @ symbol for time!* Use this format:\n`.schedule YYYY-MM-DD @ HH:MM - Task Description`" });
-                            continue;
+                        if (data.date && data.time && data.task) {
+                            const newEvent = new Schedule({ 
+                                task: data.task, 
+                                date: data.date, 
+                                time: data.time 
+                            });
+                            await newEvent.save();
+                            
+                            await sock.sendMessage(remoteJid, { 
+                                text: `✅ *Event Scheduled Via AI!*\n\n📅 *Date:* ${data.date}\n🕒 *Time:* ${data.time}\n📌 *Task:* ${data.task}` 
+                            });
+                        } else {
+                            await sock.sendMessage(remoteJid, { text: "❌ *Parsing Error:* AI parameters missed valid extraction boundaries." });
                         }
-
-                        const datetimeSplit = datetimePart.split('@');
-                        const rawDate = datetimeSplit[0].trim();
-                        const rawTime = datetimeSplit[1].trim(); 
-                        
-                        const newEvent = new Schedule({ task: taskText, date: rawDate, time: rawTime });
-                        await newEvent.save();
-                        
-                        await sock.sendMessage(remoteJid, { text: `✅ *Event Scheduled!* Cloud logged event on *${rawDate}* at *${rawTime}*.\n\n👉 _${taskText}_` });
                     } catch (err) {
-                        console.error("Scheduler parsing crash prevented:", err.message);
-                        await sock.sendMessage(remoteJid, { text: `❌ *System Error:* Failed to log your task.` });
+                        console.error("AI Scheduler parser structural failure:", err.message);
                     }
-                    continue;
+                    continue; 
                 }
             }
 
@@ -396,4 +405,27 @@ async function startAgent() {
 
                     let replyText = completion.choices[0].message.content;
 
-                
+                    const memoryMatch = replyText.match(/\[MEMORY:(.*?)\]/i);
+                    if (memoryMatch) {
+                        const newFact = memoryMatch[1].trim();
+                        userProfile.knownFacts.push(newFact);
+                        replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
+                    }
+                    
+                    userProfile.chatHistory.push({ role: "assistant", content: replyText });
+                    if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift();
+
+                    if (typeof userProfile.save === 'function') await userProfile.save();
+
+                    await sock.sendMessage(remoteJid, { text: replyText });
+                } catch (err) { console.error("Personal desk engine error:", err.message); }
+            }
+        }
+    });
+}
+
+startAgent();
+
+const app = express();
+app.get('/', (req, res) => res.send('Kukatai Agent is running 24/7 in the cloud!'));
+app.listen(process.env.PORT || 3000, () => console.log(`🌐 Web server active`));
