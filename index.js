@@ -92,28 +92,12 @@ async function useMongoDBAuthState() {
 let agentModeActive = true; 
 const myDmJid = "2348148698365@s.whatsapp.net";
 
-// 📡 LIVE INTERNET NEWS FETCH ENGINE
-async function fetchLiveNigeriaNews() {
-    try {
-        const apiKey = process.env.NEWS_API_KEY;
-        if (!apiKey) return "No News API key set.";
-        const response = await axios.get(`https://newsapi.org/v2/everything?q=Nigeria+AND+(tech+OR+business+OR+fintech)&sortBy=publishedAt&pageSize=5&apiKey=${apiKey}`);
-        if (response.data && response.data.articles.length > 0) {
-            return response.data.articles.map((art, i) => `[Headline ${i+1}]: ${art.title} - ${art.description || ''}`).join('\n\n');
-        }
-        return "No breaking stories found.";
-    } catch (err) {
-        return "Standard macro momentum stabilization tracking on core tech parameters.";
-    }
-}
-
 // 💱 LIVE FCSAPI FOREX ENGINE
 async function fetchFcsapiForexMatrix() {
     try {
         const fxKey = process.env.FOREX_API_KEY;
         if (!fxKey) return "Error: FOREX_API_KEY environment variable is unconfigured.";
         
-        // Fetching real-time latest data for EUR/USD (1), GBP/USD (2), and USD/JPY (3)
         const response = await axios.get(`https://fcsapi.com/api-v3/forex/latest?id=1,2,3&access_key=${fxKey}`);
         
         if (response.data && response.data.status && response.data.response) {
@@ -130,8 +114,8 @@ async function fetchFcsapiForexMatrix() {
 
 // ⏰ AUTOMATED CRON SCHEDULER CONTROLLER
 function startProactiveAutomationClocks(sock) {
-    
-    // 🌅 1. Daily Morning Briefing Loop (7:00 AM WAT)
+
+    // 🌅 1. Daily Morning Financial Briefing Loop (7:00 AM WAT)
     cron.schedule('0 7 * * *', async () => {
         const todayStr = new Date().toISOString().split('T')[0];
         let agendaList = "- No events scheduled for today, boss. Free space!";
@@ -140,33 +124,58 @@ function startProactiveAutomationClocks(sock) {
             if (items.length > 0) agendaList = items.map((item, i) => `- [${item.time}]: ${item.task}`).join('\n');
         } catch (e) {}
 
-        const liveNewsContext = await fetchLiveNigeriaNews();
+        const liveForexMatrixContext = await fetchFcsapiForexMatrix();
 
         try {
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
                 messages: [
-                    { role: "system", content: "You are Kuka-tai, assistant to Toluwanimi. Build an elite, motivational daily morning update using bold Pidgin mixed with developer confidence. Summarize the provided live news text into tactical points." },
-                    { role: "user", content: `Here is the data for today:\n\nCalendar:\n${agendaList}\n\nLive Raw Internet News:\n${liveNewsContext}` }
+                    { 
+                        role: "system", 
+                        content: `You are Kuka-tai, executive assistant to Toluwanimi. 
+                        Build an elite, motivational daily morning briefing using bold Pidgin mixed with developer confidence.
+                        
+                        🚨 FORMATTING MANDATE:
+                        DO NOT USE ANY ASTERISKS OR STARS (e.g., do NOT use **, ***, or *). 
+                        Format your response completely in clean, plain text using line breaks, capital letters, emojis, and dashes to divide your sections nicely.
+                        
+                        Synthesize the provided live market data feed into crisp, general market trends, followed immediately by listing his scheduled agenda items for the day layout.` 
+                    },
+                    { role: "user", content: `Date context: 2026-07-13\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
                 ]
             });
-            await sock.sendMessage(myDmJid, { text: `🌅 *KUKA-TAI MORNING BRIEFING*\n\n${completion.choices[0].message.content}` });
-        } catch (err) {}
+            await sock.sendMessage(myDmJid, { text: `🌅 KUKA-TAI DAILY MORNING BRIEFING\n\n${completion.choices[0].message.content}` });
+        } catch (err) { console.error("Morning brief error:", err.message); }
     }, { timezone: "Africa/Lagos" });
 
-    // 🕒 2. Periodic 4-Hour News Pulse (Fires every 4 hours)
+    // 📊 2. Automated 4-Hour Proactive Market Intelligence Loop (Fires every 4 hours)
     cron.schedule('0 */4 * * *', async () => {
-        const rawNews = await fetchLiveNigeriaNews();
+        console.log("⏰ Running 4-hour automated live forex structural pulse ticker...");
+        const fxDataMatrix = await fetchFcsapiForexMatrix();
+
         try {
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
                 messages: [
-                    { role: "system", content: "You are Kuka-tai. Review the raw news text and synthesize it into a swift, sharp 4-sentence tactical feed for your boss. Keep it conversational, sharp, and business-focused." },
-                    { role: "user", content: `Raw Data:\n${rawNews}` }
+                    { 
+                        role: "system", 
+                        content: `You are Kuka-tai, Toluwanimi's Lead Quantitative Risk Engine. 
+                        Every 4 hours, you intercept real-time price metrics to map institutional volatility.
+                        Review the real-time high/low matrix prices from FCSAPI and construct highly tactical trade profiles. 
+                        
+                        You must output clean setup indicators using professional developer confidence mixed with smooth trading Pidgin:
+                        1. Directional Bias Strategy (Buy Stop / Sell Stop / Market Execution)
+                        2. Calculated Entry Zone
+                        3. Strict Take Profit Levels (TP1 and TP2 targets)
+                        4. Risk Mitigation Stop Loss (SL level positioned directly outside standard session volatility boundaries)
+                        
+                        Format beautifully using line breaks and clear bullet points. Avoid all news. Do not use asterisks (*).` 
+                    },
+                    { role: "user", content: `Live FCSAPI Forex Feed:\n\n${fxDataMatrix}` }
                 ]
             });
-            await sock.sendMessage(myDmJid, { text: `📊 *KUKA-TAI 4-HOUR MARKET UPDATE*\n\n${completion.choices[0].message.content}` });
-        } catch (err) {}
+            await sock.sendMessage(myDmJid, { text: `📊 KUKA-TAI 4-HOUR AUTOMATED MARKET BRIEF\n\n${completion.choices[0].message.content}` });
+        } catch (err) { console.error("4-hour automated FX pulse failed:", err.message); }
     }, { timezone: "Africa/Lagos" });
 
     // ⏱️ 3. Calendar Ticker (Runs every 15 minutes to send 30-minute countdown alerts)
@@ -184,43 +193,13 @@ function startProactiveAutomationClocks(sock) {
             const dynamicMatch = await Schedule.findOne({ date: dateStr, time: targetTimeStr, alertSent: false });
             if (dynamicMatch) {
                 await sock.sendMessage(myDmJid, { 
-                    text: `🔔 *KUKA-TAI SCHEDULE ALERT*\n\nBoss, quick heads up! In exactly 30 minutes (*${dynamicMatch.time}*), you have:\n👉 *${dynamicMatch.task}*\n\nMake I prepare any logs or keep system running?` 
+                    text: `🔔 KUKA-TAI SCHEDULE ALERT\n\nBoss, quick heads up! In exactly 30 minutes (${dynamicMatch.time}), you have:\n👉 ${dynamicMatch.task}\n\nMake I prepare any logs or keep system running?` 
                 });
                 dynamicMatch.alertSent = true;
                 await dynamicMatch.save();
             }
         } catch (err) { console.error("Ticker engine malfunction:", err.message); }
     });
-
-    // 🇺🇸 4. Automated NY Open Order Block Scanner (Fires Mon-Fri at 1:30 PM WAT / 8:30 AM New York Open)
-    cron.schedule('30 13 * * 1-5', async () => {
-        console.log("⏰ 1:30 PM WAT: NY Session open sequence detected. Extracting FCSAPI matrix...");
-        const fxDataMatrix = await fetchFcsapiForexMatrix();
-
-        try {
-            const completion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                messages: [
-                    { 
-                        role: "system", 
-                        content: `You are Kuka-tai, Toluwanimi's Lead Wall Street Risk Engine. 
-                        The time is exactly 1:30 PM West Africa Time. Volatility drops have hit the New York trading desks.
-                        Review the real-time high/low matrix prices from FCSAPI and construct highly tactical trade profiles. 
-                        
-                        You must output clear setup indicators using professional developer confidence mixed with smooth trading Pidgin:
-                        1. Directional Bias Strategy (Buy Stop / Sell Stop / Market Execution)
-                        2. Calculated Entry Zone
-                        3. Strict Take Profit Levels (TP1 and TP2 targets)
-                        4. Risk Mitigation Stop Loss (SL level positioned directly outside standard session volatility boundaries)
-                        
-                        Format beautifully with bold headings and emoji structures.` 
-                    },
-                    { role: "user", content: `Live FCSAPI Forex Feed:\n\n${fxDataMatrix}` }
-                ]
-            });
-            await sock.sendMessage(myDmJid, { text: `🇺🇸 *NY OPEN PROACTIVE FOREX ANALYSIS (FCSAPI)*\n\n${completion.choices[0].message.content}` });
-        } catch (err) { console.error("Proactive FX blast failed:", err.message); }
-    }, { timezone: "Africa/Lagos" });
 }
 
 async function startAgent() {
@@ -246,7 +225,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (FCSAPI ROUTINES LOADED)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL PIPELINES DEPLOYED)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -278,29 +257,29 @@ async function startAgent() {
             if (fromMe && !isGroup) {
                 if (lowerText === '.agent on') {
                     agentModeActive = true;
-                    await sock.sendMessage(remoteJid, { text: "💼 *Agent Mode ON.*" });
+                    await sock.sendMessage(remoteJid, { text: "💼 Agent Mode ON." });
                     continue;
                 }
                 if (lowerText === '.agent off') {
                     agentModeActive = false;
-                    await sock.sendMessage(remoteJid, { text: "👋 *Agent Mode OFF.*" });
+                    await sock.sendMessage(remoteJid, { text: "👋 Agent Mode OFF." });
                     continue;
                 }
 
                 // 📊 MANUAL MARKET TICKER FOREX SCANNER COMMAND (FCSAPI)
                 if (lowerText === '.market') {
                     try {
-                        await sock.sendMessage(remoteJid, { text: "⏳ *Intercepting liquid exchange matrix and computing session support levels via FCSAPI...*" });
+                        await sock.sendMessage(remoteJid, { text: "⏳ Intercepting liquid exchange matrix and computing session support levels via FCSAPI..." });
                         const fxMatrix = await fetchFcsapiForexMatrix();
 
                         const completion = await openai.chat.completions.create({
                             model: "gpt-4o-mini",
                             messages: [
-                                { role: "system", content: "You are Kuka-tai, Toluwanimi's Quantum FX Terminal. Take the live currency high/low metrics from FCSAPI and run immediate structure calculations. Output clear trading ideas outlining Entry targets, Take Profit checkpoints, and explicit Stop Loss safeguards." },
-                                { role: "user", content: `Live FCSAPI Feed Data:\n\n${fxMatrix}` }
+                                { role: "system", content: "You are Kuka-tai, Toluwanimi's Quantum FX Terminal. Take the live currency high/low metrics from FCSAPI and run immediate structure calculations. Output clear trading ideas outlining Entry targets, Take Profit checkpoints, and explicit Stop Loss safeguards. Do not use asterisks (*)." },
+                                { user: "user", content: `Live FCSAPI Feed Data:\n\n${fxMatrix}` }
                             ]
                         });
-                        await sock.sendMessage(remoteJid, { text: `💱 *ON-DEMAND FOREX SCALPING MATRIX*\n\n${completion.choices[0].message.content}` });
+                        await sock.sendMessage(remoteJid, { text: `💱 ON-DEMAND FOREX SCALPING MATRIX\n\n${completion.choices[0].message.content}` });
                     } catch (err) { console.error("Manual market loop failed:", err.message); }
                     continue;
                 }
@@ -329,9 +308,9 @@ async function startAgent() {
                         if (data.date && data.time && data.task) {
                             const newEvent = new Schedule({ task: data.task, date: data.date, time: data.time });
                             await newEvent.save();
-                            await sock.sendMessage(remoteJid, { text: `✅ *Event Scheduled Via AI!*\n\n📅 *Date:* ${data.date}\n🕒 *Time:* ${data.time}\n📌 *Task:* ${data.task}` });
+                            await sock.sendMessage(remoteJid, { text: `✅ Event Scheduled Via AI!\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
                         } else {
-                            await sock.sendMessage(remoteJid, { text: "❌ *Parsing Error:* AI parameters missed valid extraction boundaries." });
+                            await sock.sendMessage(remoteJid, { text: "❌ Parsing Error: AI parameters missed valid extraction boundaries." });
                         }
                     } catch (err) { console.error("AI Scheduler parser failure:", err.message); }
                     continue; 
@@ -374,7 +353,7 @@ async function startAgent() {
                         const completion = await openai.chat.completions.create({
                             model: "gpt-4o-mini",
                             messages: [
-                                { role: "system", content: `You are Toluwanimi's Assistant. Keep group replies brief. Direct Softdev business to DM.` },
+                                { role: "system", content: `You are Toluwanimi's Assistant. Keep group replies brief. Direct Softdev business to DM. Do not use asterisks.` },
                                 { role: "user", content: textMessage }
                             ],
                         });
@@ -415,6 +394,7 @@ async function startAgent() {
                             1. NO CUSTOMER SERVICE: NEVER ask "How can I help you?", "What's popping?", or "Anything else?".
                             2. NO FORCED CHATS: If the user just laughs ("😂"), says "ok", or has nothing to say, politely end the chat or just match the energy. DO NOT ask a question to force the conversation.
                             3. IDENTITY CLAUSE: If the user mentions "Tolu", they are referring to your boss, Toluwanimi. Do not act confused. Reply on his behalf.
+                            4. NO MARKDOWN STARS: Never use formatting asterisks (*).
 
                             💳 BANK DETAILS & SECURITY OVERRIDE (CRITICAL LAW):
                             - Bank: Opay | Account Number: 8148698365 | Name: Toluwanimi Oyetade Blessing
