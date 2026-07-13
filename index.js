@@ -96,22 +96,42 @@ const myDmJid = "2348148698365@s.whatsapp.net";
 async function fetchLiveNigeriaNews() {
     try {
         const apiKey = process.env.NEWS_API_KEY;
-        if (!apiKey) return "No News API key set. Displaying macro updates instead.";
-        
+        if (!apiKey) return "No News API key set.";
         const response = await axios.get(`https://newsapi.org/v2/everything?q=Nigeria+AND+(tech+OR+business+OR+fintech)&sortBy=publishedAt&pageSize=5&apiKey=${apiKey}`);
         if (response.data && response.data.articles.length > 0) {
             return response.data.articles.map((art, i) => `[Headline ${i+1}]: ${art.title} - ${art.description || ''}`).join('\n\n');
         }
-        return "No breaking stories found in the last couple hours.";
+        return "No breaking stories found.";
     } catch (err) {
-        return "Standard macro momentum: Tech ecosystem trends shifting toward utility scaling; policy adjustments continuing.";
+        return "Standard macro momentum stabilization tracking on core tech parameters.";
+    }
+}
+
+// 💱 LIVE FCSAPI FOREX ENGINE
+async function fetchFcsapiForexMatrix() {
+    try {
+        const fxKey = process.env.FOREX_API_KEY;
+        if (!fxKey) return "Error: FOREX_API_KEY environment variable is unconfigured.";
+        
+        // Fetching real-time latest data for EUR/USD (1), GBP/USD (2), and USD/JPY (3)
+        const response = await axios.get(`https://fcsapi.com/api-v3/forex/latest?id=1,2,3&access_key=${fxKey}`);
+        
+        if (response.data && response.data.status && response.data.response) {
+            return response.data.response.map(q => 
+                `📌 Pair: ${q.s}\n• Price: ${q.c}\n• 24h High: ${q.h} | 24h Low: ${q.l}\n• Last Change: ${q.ch || '0.00'}`
+            ).join('\n\n');
+        }
+        return "FCSAPI reporting flat execution channels currently.";
+    } catch (err) {
+        console.error("FCSAPI Matrix Fetch Failed:", err.message);
+        return "Fallback Framework: Live liquidity fields matching standard WAT baseline structures.";
     }
 }
 
 // ⏰ AUTOMATED CRON SCHEDULER CONTROLLER
 function startProactiveAutomationClocks(sock) {
     
-    // 🌅 1. Daily Morning Briefing Loop (7:00 AM)
+    // 🌅 1. Daily Morning Briefing Loop (7:00 AM WAT)
     cron.schedule('0 7 * * *', async () => {
         const todayStr = new Date().toISOString().split('T')[0];
         let agendaList = "- No events scheduled for today, boss. Free space!";
@@ -153,7 +173,6 @@ function startProactiveAutomationClocks(sock) {
     cron.schedule('*/15 * * * *', async () => {
         const now = new Date();
         const lagosTime = new Date(now.toLocaleString("en-US", {timeZone: "Africa/Lagos"}));
-        
         const dateStr = lagosTime.toISOString().split('T')[0];
         
         lagosTime.setMinutes(lagosTime.getMinutes() + 30);
@@ -172,11 +191,40 @@ function startProactiveAutomationClocks(sock) {
             }
         } catch (err) { console.error("Ticker engine malfunction:", err.message); }
     });
+
+    // 🇺🇸 4. Automated NY Open Order Block Scanner (Fires Mon-Fri at 1:30 PM WAT / 8:30 AM New York Open)
+    cron.schedule('30 13 * * 1-5', async () => {
+        console.log("⏰ 1:30 PM WAT: NY Session open sequence detected. Extracting FCSAPI matrix...");
+        const fxDataMatrix = await fetchFcsapiForexMatrix();
+
+        try {
+            const completion = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                messages: [
+                    { 
+                        role: "system", 
+                        content: `You are Kuka-tai, Toluwanimi's Lead Wall Street Risk Engine. 
+                        The time is exactly 1:30 PM West Africa Time. Volatility drops have hit the New York trading desks.
+                        Review the real-time high/low matrix prices from FCSAPI and construct highly tactical trade profiles. 
+                        
+                        You must output clear setup indicators using professional developer confidence mixed with smooth trading Pidgin:
+                        1. Directional Bias Strategy (Buy Stop / Sell Stop / Market Execution)
+                        2. Calculated Entry Zone
+                        3. Strict Take Profit Levels (TP1 and TP2 targets)
+                        4. Risk Mitigation Stop Loss (SL level positioned directly outside standard session volatility boundaries)
+                        
+                        Format beautifully with bold headings and emoji structures.` 
+                    },
+                    { role: "user", content: `Live FCSAPI Forex Feed:\n\n${fxDataMatrix}` }
+                ]
+            });
+            await sock.sendMessage(myDmJid, { text: `🇺🇸 *NY OPEN PROACTIVE FOREX ANALYSIS (FCSAPI)*\n\n${completion.choices[0].message.content}` });
+        } catch (err) { console.error("Proactive FX blast failed:", err.message); }
+    }, { timezone: "Africa/Lagos" });
 }
 
 async function startAgent() {
     const { state, saveCreds } = await useMongoDBAuthState();
-    
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
@@ -198,7 +246,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL RADARS ACTIVE)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (FCSAPI ROUTINES LOADED)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -238,41 +286,55 @@ async function startAgent() {
                     await sock.sendMessage(remoteJid, { text: "👋 *Agent Mode OFF.*" });
                     continue;
                 }
+
+                // 📊 MANUAL MARKET TICKER FOREX SCANNER COMMAND (FCSAPI)
+                if (lowerText === '.market') {
+                    try {
+                        await sock.sendMessage(remoteJid, { text: "⏳ *Intercepting liquid exchange matrix and computing session support levels via FCSAPI...*" });
+                        const fxMatrix = await fetchFcsapiForexMatrix();
+
+                        const completion = await openai.chat.completions.create({
+                            model: "gpt-4o-mini",
+                            messages: [
+                                { role: "system", content: "You are Kuka-tai, Toluwanimi's Quantum FX Terminal. Take the live currency high/low metrics from FCSAPI and run immediate structure calculations. Output clear trading ideas outlining Entry targets, Take Profit checkpoints, and explicit Stop Loss safeguards." },
+                                { role: "user", content: `Live FCSAPI Feed Data:\n\n${fxMatrix}` }
+                            ]
+                        });
+                        await sock.sendMessage(remoteJid, { text: `💱 *ON-DEMAND FOREX SCALPING MATRIX*\n\n${completion.choices[0].message.content}` });
+                    } catch (err) { console.error("Manual market loop failed:", err.message); }
+                    continue;
+                }
                 
-                // 🛠️ REWRITTEN: Ultra-Forgiving String Position Index Scanner
+                // 🧠 OpenAI-Powered Schedule Schema-Forced Parser
                 if (lowerText.startsWith('.schedule')) {
                     try {
-                        // Completely strip out WhatsApp's hidden char payloads and links
-                        let cleanText = textMessage.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+                        const completion = await openai.chat.completions.create({
+                            model: "gpt-4o-mini",
+                            response_format: { type: "json_object" },
+                            messages: [
+                                {
+                                    role: "system",
+                                    content: `You are a structured data extraction utility. Extract scheduling details from the input string. 
+                                    Return a strictly structured JSON object with exactly three keys: 
+                                    "date" (formatted strictly as YYYY-MM-DD), 
+                                    "time" (formatted strictly as HH:MM in 24-hour format), 
+                                    and "task" (the clean text description of the event).
+                                    Current date context is Monday, July 13, 2026.`
+                                },
+                                { role: "user", content: textMessage }
+                            ]
+                        });
 
-                        if (!cleanText.includes('@') || !cleanText.includes('-')) {
-                            await sock.sendMessage(remoteJid, { text: "⚠️ *Format Error!* Make sure you use both the `@` symbol and the `-` dash:\n\n`.schedule YYYY-MM-DD @ HH:MM - Description`" });
-                            continue;
-                        }
-
-                        // Parse boundaries safely based on structural anchors
-                        const atIndex = cleanText.indexOf('@');
-                        const dashIndex = cleanText.indexOf('-');
-
-                        // Extract and isolate individual fields safely
-                        const rawDate = cleanText.substring(9, atIndex).replace(/[^0-9-]/g, '').trim(); // Only leaves numbers and hyphens
-                        const rawTime = cleanText.substring(atIndex + 1, dashIndex).replace(/[^0-9:]/g, '').trim(); // Only leaves numbers and colons
-                        const taskText = cleanText.substring(dashIndex + 1).trim();
-
-                        if (rawDate.length >= 8 && rawTime.length >= 4 && taskText.length > 0) {
-                            const newEvent = new Schedule({ task: taskText, date: rawDate, time: rawTime });
+                        const data = JSON.parse(completion.choices[0].message.content);
+                        if (data.date && data.time && data.task) {
+                            const newEvent = new Schedule({ task: data.task, date: data.date, time: data.time });
                             await newEvent.save();
-                            
-                            await sock.sendMessage(remoteJid, { 
-                                text: `✅ *Event Scheduled!* Cloud logged event details:\n\n📅 *Date:* ${rawDate}\n🕒 *Time:* ${rawTime}\n📌 *Task:* ${taskText}` 
-                            });
+                            await sock.sendMessage(remoteJid, { text: `✅ *Event Scheduled Via AI!*\n\n📅 *Date:* ${data.date}\n🕒 *Time:* ${data.time}\n📌 *Task:* ${data.task}` });
                         } else {
-                            await sock.sendMessage(remoteJid, { text: "❌ *Parsing Failed.* Could not extract clear time or date boundaries. Try typing it plainly." });
+                            await sock.sendMessage(remoteJid, { text: "❌ *Parsing Error:* AI parameters missed valid extraction boundaries." });
                         }
-                    } catch (err) {
-                        console.error("Scheduler crash prevented:", err.message);
-                    }
-                    continue; // Lock the execution frame so it never reaches the AI loop
+                    } catch (err) { console.error("AI Scheduler parser failure:", err.message); }
+                    continue; 
                 }
             }
 
@@ -324,7 +386,6 @@ async function startAgent() {
 
             // 📩 2. PERSONAL DM ASSISTANT & SILENT OBSERVER
             if (!isGroup) {
-                // Ignore any message that starts with a dot if it leaked past command layer to prevent AI echo loops
                 if (textMessage.startsWith('.')) continue;
 
                 let userProfile;
