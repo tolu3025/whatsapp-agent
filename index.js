@@ -135,11 +135,10 @@ function startProactiveAutomationClocks(sock) {
                         content: `You are Kuka-tai, executive assistant to Toluwanimi. 
                         Build an elite, motivational daily morning briefing using bold Pidgin mixed with developer confidence.
                         
-                        🚨 FORMATTING MANDATE:
-                        DO NOT USE ANY ASTERISKS OR STARS (e.g., do NOT use **, ***, or *). 
-                        Format your response completely in clean, plain text using line breaks, capital letters, emojis, and dashes to divide your sections nicely.
-                        
-                        Synthesize the provided live market data feed into crisp, general market trends, followed immediately by listing his scheduled agenda items for the day layout.` 
+                        ⚠️ CRITICAL FORMATTING RULE: 
+                        YOU ARE STRICTLY FORBIDDEN FROM USING ASTERISKS (*) OR MARKOVER SHARP SIGNS (#). 
+                        Do NOT use double asterisks (** text **) for bolding, and do NOT use triple asterisks. 
+                        To emphasize headers, write them in completely UPPERCASE letters. Use standard line breaks and emojis to make the layout clear, clean, and highly readable on WhatsApp.` 
                     },
                     { role: "user", content: `Date context: 2026-07-13\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
                 ]
@@ -163,13 +162,16 @@ function startProactiveAutomationClocks(sock) {
                         Every 4 hours, you intercept real-time price metrics to map institutional volatility.
                         Review the real-time high/low matrix prices from FCSAPI and construct highly tactical trade profiles. 
                         
-                        You must output clean setup indicators using professional developer confidence mixed with smooth trading Pidgin:
+                        You must output clear setup indicators using professional developer confidence mixed with smooth trading Pidgin:
                         1. Directional Bias Strategy (Buy Stop / Sell Stop / Market Execution)
                         2. Calculated Entry Zone
                         3. Strict Take Profit Levels (TP1 and TP2 targets)
                         4. Risk Mitigation Stop Loss (SL level positioned directly outside standard session volatility boundaries)
                         
-                        Format beautifully using line breaks and clear bullet points. Avoid all news. Do not use asterisks (*).` 
+                        ⚠️ CRITICAL FORMATTING RULE: 
+                        YOU ARE STRICTLY FORBIDDEN FROM USING ASTERISKS (*) OR MARKOVER SHARP SIGNS (#). 
+                        Do NOT use double asterisks (** text **) for bolding. For section headers, use UPPERCASE text. 
+                        Format using clear line breaks, simple dashes (-), and emojis. Avoid all news.` 
                     },
                     { role: "user", content: `Live FCSAPI Forex Feed:\n\n${fxDataMatrix}` }
                 ]
@@ -225,7 +227,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL PIPELINES DEPLOYED)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (PURE RECTIFIED TEXT ENGINES DEPLOYED)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -275,8 +277,16 @@ async function startAgent() {
                         const completion = await openai.chat.completions.create({
                             model: "gpt-4o-mini",
                             messages: [
-                                { role: "system", content: "You are Kuka-tai, Toluwanimi's Quantum FX Terminal. Take the live currency high/low metrics from FCSAPI and run immediate structure calculations. Output clear trading ideas outlining Entry targets, Take Profit checkpoints, and explicit Stop Loss safeguards. Do not use asterisks (*)." },
-                                { user: "user", content: `Live FCSAPI Feed Data:\n\n${fxMatrix}` }
+                                { 
+                                    role: "system", 
+                                    content: `You are Kuka-tai, Toluwanimi's Quantum FX Terminal. Take live metrics from FCSAPI and calculate structural ranges. 
+                                    Output clear trading ideas outlining Entry targets, Take Profit checkpoints, and explicit Stop Loss safeguards. 
+                                    
+                                    ⚠️ CRITICAL FORMATTING RULE:
+                                    DO NOT USE ANY ASTERISKS (*) OR HASHTAGS (#). 
+                                    Write sections in clean UPPERCASE text blocks instead. Use spaces and line breaks for layout formatting.` 
+                                },
+                                { role: "user", content: `Live FCSAPI Feed Data:\n\n${fxMatrix}` }
                             ]
                         });
                         await sock.sendMessage(remoteJid, { text: `💱 ON-DEMAND FOREX SCALPING MATRIX\n\n${completion.choices[0].message.content}` });
@@ -353,7 +363,7 @@ async function startAgent() {
                         const completion = await openai.chat.completions.create({
                             model: "gpt-4o-mini",
                             messages: [
-                                { role: "system", content: `You are Toluwanimi's Assistant. Keep group replies brief. Direct Softdev business to DM. Do not use asterisks.` },
+                                { role: "system", content: `You are Toluwanimi's Assistant. Keep group replies brief. Direct Softdev business to DM. Do not use asterisks (*).` },
                                 { role: "user", content: textMessage }
                             ],
                         });
@@ -394,7 +404,7 @@ async function startAgent() {
                             1. NO CUSTOMER SERVICE: NEVER ask "How can I help you?", "What's popping?", or "Anything else?".
                             2. NO FORCED CHATS: If the user just laughs ("😂"), says "ok", or has nothing to say, politely end the chat or just match the energy. DO NOT ask a question to force the conversation.
                             3. IDENTITY CLAUSE: If the user mentions "Tolu", they are referring to your boss, Toluwanimi. Do not act confused. Reply on his behalf.
-                            4. NO MARKDOWN STARS: Never use formatting asterisks (*).
+                            4. NO FORMATTING ASTERISKS: You are completely forbidden from using asterisks (*).
 
                             💳 BANK DETAILS & SECURITY OVERRIDE (CRITICAL LAW):
                             - Bank: Opay | Account Number: 8148698365 | Name: Toluwanimi Oyetade Blessing
