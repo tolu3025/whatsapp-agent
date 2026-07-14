@@ -118,7 +118,7 @@ function startProactiveAutomationClocks(sock) {
     // 🌅 1. Daily Morning Financial Briefing Loop (7:00 AM WAT)
     cron.schedule('0 7 * * *', async () => {
         const todayStr = new Date().toISOString().split('T')[0];
-        let agendaList = "- No events scheduled for today, boss. Free space!";
+        let agendaList = "No events scheduled for today, boss. Free space!";
         try {
             const items = await Schedule.find({ date: todayStr });
             if (items.length > 0) agendaList = items.map((item, i) => `- [${item.time}]: ${item.task}`).join('\n');
@@ -231,7 +231,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL SYSTEMS ACTIVE)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL SYSTEMS CORRECTED)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -304,34 +304,45 @@ async function startAgent() {
                 // 🧠 OpenAI-Powered Schedule Action Parser (CREATE, UPDATE, DELETE, LIST)
                 if (lowerText.startsWith('.schedule')) {
                     try {
+                        const commandBody = textMessage.replace(/^\.schedule/i, '').trim();
+
                         const completion = await openai.chat.completions.create({
                             model: "gpt-4o-mini",
                             response_format: { type: "json_object" },
                             messages: [
                                 {
                                     role: "system",
-                                    content: `You are an intelligent database query planner for a schedule database. 
-                                    Analyze the user's message and return a strictly structured JSON object with these keys:
-                                    - "action": "create" | "update" | "delete" | "list"
-                                    - "date": "YYYY-MM-DD" (Required only for create or update)
-                                    - "time": "HH:MM" (24-hour format, Required only for create or update)
-                                    - "task": "clean descriptive text" (Required only for create or update)
-                                    - "searchQuery": "fragment" (For delete/update. Extract a key phrase from the message to identify which task to target, e.g. "Kukapay" or "techcirvee")
-                                    - "updateField": "date" | "time" | "task" | "all" (Only for update action)
+                                    content: `You are a scheduling command analyzer. Classify the user's instructions into one of these actions:
+                                    1. "list" -> If the user wants to see, display, or list upcoming tasks (e.g. ".schedule list").
+                                    2. "delete" -> If they want to remove, cancel, or clear a task (e.g. ".schedule delete Friday task").
+                                    3. "update" -> If they want to change, modify, edit, or adjust an existing task's details, date, or time (e.g. ".schedule change Friday task time to 9:00").
+                                    4. "create" -> ONLY if they are describing a completely new task to log from scratch (e.g. ".schedule 2026-07-17 @ 09:00 - IFT 212 exam").
                                     
-                                    Current Date context is Tuesday, July 14, 2026.`
+                                    Return a strictly structured JSON object with these keys:
+                                    - "action": "create" | "update" | "delete" | "list"
+                                    - "date": "YYYY-MM-DD" (Calculated correctly from context; only for create/update)
+                                    - "time": "HH:MM" (24-hour format; only for create/update)
+                                    - "task": "clean description" (The task details; only for create/update)
+                                    - "searchQuery": "fragment" (For delete/update. Extract the target task keyword, e.g. "IFT 212" or "Friday")
+                                    - "updateField": "date" | "time" | "task" | "all" (Only for update)
+                                    
+                                    Current Date context: Tuesday, July 14, 2026.`
                                 },
-                                { role: "user", content: textMessage }
+                                { role: "user", content: commandBody }
                             ]
                         });
 
                         const data = JSON.parse(completion.choices[0].message.content);
-                        
-                        // Execute Database Actions
-                        if (data.action === "create") {
-                            const newEvent = new Schedule({ task: data.task, date: data.date, time: data.time });
-                            await newEvent.save();
-                            await sock.sendMessage(remoteJid, { text: `✅ EVENT SCHEDULED VIA AI\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
+                        console.log("Resolved AI Schedule Action Plan:", data);
+
+                        if (data.action === "list") {
+                            const upcoming = await Schedule.find({}).sort({ date: 1, time: 1 }).limit(10);
+                            if (upcoming.length > 0) {
+                                const listStr = upcoming.map((ev, i) => `${i+1}. [${ev.date} @ ${ev.time} WAT] - ${ev.task}`).join('\n');
+                                await sock.sendMessage(remoteJid, { text: `📅 CURRENT SCHEDULED TASKS\n\n${listStr}` });
+                            } else {
+                                await sock.sendMessage(remoteJid, { text: "📅 CURRENT SCHEDULED TASKS\n\nNo scheduled tasks found in database cloud." });
+                            }
                         } 
                         else if (data.action === "delete") {
                             const result = await Schedule.deleteOne({ task: { $regex: data.searchQuery, $options: 'i' } });
@@ -342,25 +353,26 @@ async function startAgent() {
                             }
                         } 
                         else if (data.action === "update") {
-                            const event = await Schedule.findOne({ task: { $regex: data.searchQuery, $options: 'i' } });
+                            // Find matching schedule by search query OR date
+                            const queryCondition = data.searchQuery 
+                                ? { task: { $regex: data.searchQuery, $options: 'i' } } 
+                                : { date: data.date };
+
+                            const event = await Schedule.findOne(queryCondition);
                             if (event) {
-                                if (data.date) event.date = data.date;
+                                if (data.date && data.updateField !== "time" && data.updateField !== "task") event.date = data.date;
                                 if (data.time) event.time = data.time;
-                                if (data.task && data.updateField !== "date" && data.updateField !== "time") event.task = data.task;
+                                if (data.task && data.updateField === "task") event.task = data.task;
                                 await event.save();
                                 await sock.sendMessage(remoteJid, { text: `📝 TASK UPDATED SUCCESSFULLY\n\n📅 Date: ${event.date}\n🕒 Time: ${event.time}\n📌 Task: ${event.task}` });
                             } else {
-                                await sock.sendMessage(remoteJid, { text: `❌ TARGET TASK NOT FOUND\n\nCould not locate an active schedule matching: "${data.searchQuery}"` });
+                                await sock.sendMessage(remoteJid, { text: `❌ TARGET TASK NOT FOUND\n\nCould not locate an active schedule matching: "${data.searchQuery || data.date}"` });
                             }
                         } 
-                        else if (data.action === "list") {
-                            const upcoming = await Schedule.find({}).sort({ date: 1, time: 1 }).limit(10);
-                            if (upcoming.length > 0) {
-                                const listStr = upcoming.map((ev, i) => `${i+1}. [${ev.date} @ ${ev.time} WAT] - ${ev.task}`).join('\n');
-                                await sock.sendMessage(remoteJid, { text: `📅 CURRENT SCHEDULED TASKS\n\n${listStr}` });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: "📅 CURRENT SCHEDULED TASKS\n\nNo scheduled tasks found in database cloud." });
-                            }
+                        else if (data.action === "create") {
+                            const newEvent = new Schedule({ task: data.task, date: data.date, time: data.time });
+                            await newEvent.save();
+                            await sock.sendMessage(remoteJid, { text: `✅ EVENT SCHEDULED VIA AI\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
                         }
                     } catch (err) { 
                         console.error("AI Scheduler parser failure:", err.message); 
