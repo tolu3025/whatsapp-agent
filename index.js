@@ -135,12 +135,13 @@ function startProactiveAutomationClocks(sock) {
                         content: `You are Kuka-tai, executive assistant to Toluwanimi. 
                         Build an elite, motivational daily morning briefing using bold Pidgin mixed with developer confidence.
                         
-                        ⚠️ CRITICAL FORMATTING RULE: 
-                        YOU ARE STRICTLY FORBIDDEN FROM USING ASTERISKS (*) OR MARKOVER SHARP SIGNS (#). 
-                        Do NOT use double asterisks (** text **) for bolding, and do NOT use triple asterisks. 
-                        To emphasize headers, write them in completely UPPERCASE letters. Use standard line breaks and emojis to make the layout clear, clean, and highly readable on WhatsApp.` 
+                        🚨 FORMATTING MANDATE:
+                        DO NOT USE ANY ASTERISKS OR STARS (e.g., do NOT use **, ***, or *). 
+                        Format your response completely in clean, plain text using line breaks, capital letters, emojis, and dashes to divide your sections nicely.
+                        
+                        Synthesize the provided live market data feed into crisp, general market trends, followed immediately by listing his scheduled agenda items for the day layout.` 
                     },
-                    { role: "user", content: `Date context: 2026-07-13\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
+                    { role: "user", content: `Date context: 2026-07-14\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
                 ]
             });
             await sock.sendMessage(myDmJid, { text: `🌅 KUKA-TAI DAILY MORNING BRIEFING\n\n${completion.choices[0].message.content}` });
@@ -160,7 +161,10 @@ function startProactiveAutomationClocks(sock) {
                         role: "system", 
                         content: `You are Kuka-tai, Toluwanimi's Lead Quantitative Risk Engine. 
                         Every 4 hours, you intercept real-time price metrics to map institutional volatility.
-                        Review the real-time high/low matrix prices from FCSAPI and construct highly tactical trade profiles. 
+                        
+                        🚨 RISK STRATEGY OVERRIDE:
+                        - If the currency change (ch) is positive and price is closer to the High, construct a BUY/LONG breakout trade.
+                        - If the currency change (ch) is negative or price is closer to the Low, construct a SELL/SHORT breakdown trade. DO NOT force buy recommendations on bearish market structures.
                         
                         You must output clear setup indicators using professional developer confidence mixed with smooth trading Pidgin:
                         1. Directional Bias Strategy (Buy Stop / Sell Stop / Market Execution)
@@ -227,7 +231,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (PURE RECTIFIED TEXT ENGINES DEPLOYED)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL SYSTEMS ACTIVE)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -271,7 +275,7 @@ async function startAgent() {
                 // 📊 MANUAL MARKET TICKER FOREX SCANNER COMMAND (FCSAPI)
                 if (lowerText === '.market') {
                     try {
-                        await sock.sendMessage(remoteJid, { text: "⏳ Intercepting liquid exchange matrix and computing session support levels via FCSAPI..." });
+                        await sock.sendMessage(remoteJid, { text: "⏳ Intercepting liquid exchange matrix and computing session support/resistance channels..." });
                         const fxMatrix = await fetchFcsapiForexMatrix();
 
                         const completion = await openai.chat.completions.create({
@@ -280,7 +284,10 @@ async function startAgent() {
                                 { 
                                     role: "system", 
                                     content: `You are Kuka-tai, Toluwanimi's Quantum FX Terminal. Take live metrics from FCSAPI and calculate structural ranges. 
-                                    Output clear trading ideas outlining Entry targets, Take Profit checkpoints, and explicit Stop Loss safeguards. 
+                                    
+                                    🚨 TWO-SIDED MARKET ANALYSIS MANDATE:
+                                    - If change (ch) is positive, write a LONG/BUY setup above high.
+                                    - If change (ch) is negative or price is closer to the low, write a SHORT/SELL setup below low. Never force buys on structural downtrends.
                                     
                                     ⚠️ CRITICAL FORMATTING RULE:
                                     DO NOT USE ANY ASTERISKS (*) OR HASHTAGS (#). 
@@ -294,7 +301,7 @@ async function startAgent() {
                     continue;
                 }
                 
-                // 🧠 OpenAI-Powered Schedule Schema-Forced Parser
+                // 🧠 OpenAI-Powered Schedule Action Parser (CREATE, UPDATE, DELETE, LIST)
                 if (lowerText.startsWith('.schedule')) {
                     try {
                         const completion = await openai.chat.completions.create({
@@ -303,26 +310,62 @@ async function startAgent() {
                             messages: [
                                 {
                                     role: "system",
-                                    content: `You are a structured data extraction utility. Extract scheduling details from the input string. 
-                                    Return a strictly structured JSON object with exactly three keys: 
-                                    "date" (formatted strictly as YYYY-MM-DD), 
-                                    "time" (formatted strictly as HH:MM in 24-hour format), 
-                                    and "task" (the clean text description of the event).
-                                    Current date context is Monday, July 13, 2026.`
+                                    content: `You are an intelligent database query planner for a schedule database. 
+                                    Analyze the user's message and return a strictly structured JSON object with these keys:
+                                    - "action": "create" | "update" | "delete" | "list"
+                                    - "date": "YYYY-MM-DD" (Required only for create or update)
+                                    - "time": "HH:MM" (24-hour format, Required only for create or update)
+                                    - "task": "clean descriptive text" (Required only for create or update)
+                                    - "searchQuery": "fragment" (For delete/update. Extract a key phrase from the message to identify which task to target, e.g. "Kukapay" or "techcirvee")
+                                    - "updateField": "date" | "time" | "task" | "all" (Only for update action)
+                                    
+                                    Current Date context is Tuesday, July 14, 2026.`
                                 },
                                 { role: "user", content: textMessage }
                             ]
                         });
 
                         const data = JSON.parse(completion.choices[0].message.content);
-                        if (data.date && data.time && data.task) {
+                        
+                        // Execute Database Actions
+                        if (data.action === "create") {
                             const newEvent = new Schedule({ task: data.task, date: data.date, time: data.time });
                             await newEvent.save();
-                            await sock.sendMessage(remoteJid, { text: `✅ Event Scheduled Via AI!\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
-                        } else {
-                            await sock.sendMessage(remoteJid, { text: "❌ Parsing Error: AI parameters missed valid extraction boundaries." });
+                            await sock.sendMessage(remoteJid, { text: `✅ EVENT SCHEDULED VIA AI\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
+                        } 
+                        else if (data.action === "delete") {
+                            const result = await Schedule.deleteOne({ task: { $regex: data.searchQuery, $options: 'i' } });
+                            if (result.deletedCount > 0) {
+                                await sock.sendMessage(remoteJid, { text: `🗑️ TASK DELETED SUCCESSFULLY\n\nRemoved schedule matching query: "${data.searchQuery}"` });
+                            } else {
+                                await sock.sendMessage(remoteJid, { text: `❌ TASK NOT FOUND\n\nCould not find any upcoming schedule matching: "${data.searchQuery}"` });
+                            }
+                        } 
+                        else if (data.action === "update") {
+                            const event = await Schedule.findOne({ task: { $regex: data.searchQuery, $options: 'i' } });
+                            if (event) {
+                                if (data.date) event.date = data.date;
+                                if (data.time) event.time = data.time;
+                                if (data.task && data.updateField !== "date" && data.updateField !== "time") event.task = data.task;
+                                await event.save();
+                                await sock.sendMessage(remoteJid, { text: `📝 TASK UPDATED SUCCESSFULLY\n\n📅 Date: ${event.date}\n🕒 Time: ${event.time}\n📌 Task: ${event.task}` });
+                            } else {
+                                await sock.sendMessage(remoteJid, { text: `❌ TARGET TASK NOT FOUND\n\nCould not locate an active schedule matching: "${data.searchQuery}"` });
+                            }
+                        } 
+                        else if (data.action === "list") {
+                            const upcoming = await Schedule.find({}).sort({ date: 1, time: 1 }).limit(10);
+                            if (upcoming.length > 0) {
+                                const listStr = upcoming.map((ev, i) => `${i+1}. [${ev.date} @ ${ev.time} WAT] - ${ev.task}`).join('\n');
+                                await sock.sendMessage(remoteJid, { text: `📅 CURRENT SCHEDULED TASKS\n\n${listStr}` });
+                            } else {
+                                await sock.sendMessage(remoteJid, { text: "📅 CURRENT SCHEDULED TASKS\n\nNo scheduled tasks found in database cloud." });
+                            }
                         }
-                    } catch (err) { console.error("AI Scheduler parser failure:", err.message); }
+                    } catch (err) { 
+                        console.error("AI Scheduler parser failure:", err.message); 
+                        await sock.sendMessage(remoteJid, { text: "❌ SYSTEM ERROR: Failed to execute schedule instruction." });
+                    }
                     continue; 
                 }
             }
