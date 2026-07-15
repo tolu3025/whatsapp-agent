@@ -7,6 +7,7 @@ const express = require('express');
 const mongoose = require('mongoose'); 
 const cron = require('node-cron'); 
 const axios = require('axios'); 
+const os = require('os');
 
 const openai = new OpenAI({ 
     apiKey: process.env.OPENAI_API_KEY,
@@ -112,6 +113,51 @@ async function fetchFcsapiForexMatrix() {
     }
 }
 
+// 🧠 BACKEND SELF-TRAINING RECURSIVE SYNTAX ENGINE
+async function runSelfTrainingUpdateLoop(userDoc) {
+    try {
+        const lastConversations = userDoc.chatHistory.slice(-6).map(c => `${c.role.toUpperCase()}: ${c.text}`).join('\n');
+        const activeFacts = userDoc.knownFacts.join(', ') || "None";
+
+        const selfTrainingPrompt = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            response_format: { type: "json_object" },
+            messages: [{
+                role: "system",
+                content: `You are an automated backend user behavioral extraction engine tracking real-time user traits.
+                Review the last message exchanges and identify preferences, corrections, habits, names, or formatting rules.
+                
+                Look for:
+                - If the user corrected the AI's language style, behavior, or native pidgin tone.
+                - Important custom billing requests or recurring operational requests.
+
+                Current facts stored: [${activeFacts}]
+
+                Return a structured JSON object with an array under the key "newFacts":
+                Example: { "newFacts": ["User prefers very short responses", "User loves simple business overviews"] }
+                If nothing important changed, return an empty array.`
+            }, {
+                role: "user",
+                content: `Recent Chat Activity Logs:\n${lastConversations}`
+            }]
+        });
+
+        const result = JSON.parse(selfTrainingPrompt.choices[0].message.content);
+        if (result.newFacts && result.newFacts.length > 0) {
+            result.newFacts.forEach(fact => {
+                if (!userDoc.knownFacts.includes(fact)) {
+                    userDoc.knownFacts.push(fact);
+                }
+            });
+            if (userDoc.knownFacts.length > 15) userDoc.knownFacts.shift();
+            await userDoc.save();
+            console.log(`💡 AGENT SELF-TRAINED MEMORY EXPANDED FOR USER:`, result.newFacts);
+        }
+    } catch (e) {
+        console.error("⚠️ Background self-training execution tick failed:", e.message);
+    }
+}
+
 // ⏰ AUTOMATED CRON SCHEDULER CONTROLLER
 function startProactiveAutomationClocks(sock) {
 
@@ -133,7 +179,7 @@ function startProactiveAutomationClocks(sock) {
                     { 
                         role: "system", 
                         content: `You are Kuka-tai, executive assistant to Toluwanimi. 
-                        Build an elite, motivational daily morning briefing using bold Pidgin mixed with developer confidence.
+                        Build an elite, motivational daily morning briefing using bold authentic Nigerian Pidgin mixed with developer confidence.
                         
                         🚨 FORMATTING MANDATE:
                         DO NOT USE ANY ASTERISKS OR STARS (e.g., do NOT use **, ***, or *). 
@@ -141,7 +187,7 @@ function startProactiveAutomationClocks(sock) {
                         
                         Synthesize the provided live market data feed into crisp, general market trends, followed immediately by listing his scheduled agenda items for the day layout.` 
                     },
-                    { role: "user", content: `Date context: 2026-07-14\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
+                    { role: "user", content: `Date context: 2026-07-15\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
                 ]
             });
             await sock.sendMessage(myDmJid, { text: `🌅 KUKA-TAI DAILY MORNING BRIEFING\n\n${completion.choices[0].message.content}` });
@@ -166,7 +212,7 @@ function startProactiveAutomationClocks(sock) {
                         - If the currency change (ch) is positive and price is closer to the High, construct a BUY/LONG breakout trade.
                         - If the currency change (ch) is negative or price is closer to the Low, construct a SELL/SHORT breakdown trade. DO NOT force buy recommendations on bearish market structures.
                         
-                        You must output clear setup indicators using professional developer confidence mixed with smooth trading Pidgin:
+                        You must output clear setup indicators using professional developer confidence mixed with smooth trading natural Pidgin:
                         1. Directional Bias Strategy (Buy Stop / Sell Stop / Market Execution)
                         2. Calculated Entry Zone
                         3. Strict Take Profit Levels (TP1 and TP2 targets)
@@ -231,7 +277,7 @@ async function startAgent() {
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL SYSTEMS CORRECTED)!");
+            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (MEDIA & VISUAL CHECKS RE-ENGINEERED)!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -250,14 +296,42 @@ async function startAgent() {
             const fromMe = msg.key.fromMe;
             
             const isImageMessage = !!msg.message.imageMessage;
-            const isAudioMessage = !!msg.message.audioMessage;
+            const isStickerMessage = !!msg.message.stickerMessage;
+            const isAudioMessage = !!msg.message.audioMessage || !!msg.message.pttMessage;
             
             let textMessage = msg.message.conversation || 
                                 msg.message.extendedTextMessage?.text || 
                                 msg.message.imageMessage?.caption ||
                                 "";
 
-            const lowerText = textMessage.toLowerCase().trim();
+            let lowerText = textMessage.toLowerCase().trim();
+
+            // 🎙️ VOICE NOTE AUDIO PROCESSING ENGINE (WHISPER)
+            if (isAudioMessage && (!isGroup || fromMe)) {
+                try {
+                    console.log("🎙️ Audio message captured. Processing Transcription...");
+                    const audioBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
+                        logger: pino({ level: 'silent' }),
+                        rekeyThresholdBytes: 1800000 
+                    });
+                    
+                    const tempAudioFile = path.join(os.tmpdir(), `audio_${Date.now()}.ogg`);
+                    fs.writeFileSync(tempAudioFile, audioBuffer);
+
+                    const transcription = await openai.audio.transcriptions.create({
+                        file: fs.createReadStream(tempAudioFile),
+                        model: "whisper-1",
+                    });
+
+                    try { fs.unlinkSync(tempAudioFile); } catch (e) {}
+
+                    textMessage = transcription.text;
+                    lowerText = textMessage.toLowerCase().trim();
+                    console.log(`📝 Audio transcribed successfully: "${textMessage}"`);
+                } catch (audioErr) {
+                    console.error("❌ Whisper Transcription engine runtime failed:", audioErr.message);
+                }
+            }
 
             // 🛠️ DEFENSIVE INTERNAL COMMAND HANDLING
             if (fromMe && !isGroup) {
@@ -326,7 +400,7 @@ async function startAgent() {
                                     - "searchQuery": "fragment" (For delete/update. Extract the target task keyword, e.g. "IFT 212" or "Friday")
                                     - "updateField": "date" | "time" | "task" | "all" (Only for update)
                                     
-                                    Current Date context: Tuesday, July 14, 2026.`
+                                    Current Date context: Wednesday, July 15, 2026.`
                                 },
                                 { role: "user", content: commandBody }
                             ]
@@ -353,7 +427,6 @@ async function startAgent() {
                             }
                         } 
                         else if (data.action === "update") {
-                            // Find matching schedule by search query OR date
                             const queryCondition = data.searchQuery 
                                 ? { task: { $regex: data.searchQuery, $options: 'i' } } 
                                 : { date: data.date };
@@ -370,160 +443,159 @@ async function startAgent() {
                             }
                         } 
                         else if (data.action === "create") {
-                            const newEvent = new Schedule({ task: data.task, date: data.date, time: data.time });
+                            const newEvent = new Schedule({
+                                task: data.task,
+                                date: data.date,
+                                time: data.time,
+                                alertSent: false
+                            });
                             await newEvent.save();
-                            await sock.sendMessage(remoteJid, { text: `✅ EVENT SCHEDULED VIA AI\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
+                            await sock.sendMessage(remoteJid, { text: `✅ NEW TASK LOGGED SUCCESSFULLY\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
                         }
-                    } catch (err) { 
-                        console.error("AI Scheduler parser failure:", err.message); 
-                        await sock.sendMessage(remoteJid, { text: "❌ SYSTEM ERROR: Failed to execute schedule instruction." });
+                    } catch (err) {
+                        console.error("Schedule Parse Engine failed:", err.message);
+                        await sock.sendMessage(remoteJid, { text: "❌ System parsing error handling that schedule instruction format." });
                     }
-                    continue; 
+                    continue;
                 }
             }
 
-            if (isStatus || isNewsletter) continue;
-            
-            // 🎤 PROCESS VOICE NOTES
-            if (isAudioMessage && !fromMe) {
-                try {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                    const tempOgg = path.join(__dirname, `temp_${Date.now()}.ogg`);
-                    fs.writeFileSync(tempOgg, buffer);
-                    
-                    const transcription = await openai.audio.transcriptions.create({
-                        file: fs.createReadStream(tempOgg),
-                        model: "whisper-1",
-                        prompt: "Bolanle, bawo ni? Drop account detail boss. E se gan. Oya speak English, Pidgin, and Yoruba comfortably. Correct spellings like Opay, KukaPay, Kuka-tai, jare, na, abeg.",
-                    });
-                    
-                    textMessage = transcription.text;
-                    fs.unlinkSync(tempOgg); 
-                } catch (err) { textMessage = "[User sent a Voice Note, but I couldn't hear it clearly.]"; }
-            }
+            // 🛑 SKIP IF AGENT IS DISABLED OR OUTSIDE VALID DIRECT MESSAGE SCOPE
+            if (!agentModeActive || isGroup || isStatus || isNewsletter) continue;
 
-            if (!textMessage && !isImageMessage && !isAudioMessage) continue;
+            try {
+                // 🔄 FETCH OR INITIALIZE USER STATE FROM DATABASE
+                let userDoc = await User.findOne({ remoteJid });
+                if (!userDoc) {
+                    userDoc = new User({ remoteJid, knownFacts: [], chatHistory: [] });
+                }
 
-            // 📡 1. THE GROUP CHAT RADAR
-            if (isGroup && agentModeActive && !fromMe) {
-                const lowerMsg = textMessage.toLowerCase();
-                const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-                const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const isTagged = mentionedJids.includes(botNumber);
-                
-                const isTriggered = isTagged || lowerMsg.includes('toluwanimi') || lowerMsg.includes('admin') || lowerMsg.includes('softdev') || lowerMsg.includes('agent');
+                // Limit conversation history boundary array
+                const recentHistory = userDoc.chatHistory.slice(-8);
 
-                if (isTriggered) {
+                // 🛠️ MULTIMODAL PAYLOAD FIELD EXTRACTION
+                let messageContentPayload = [];
+
+                if (textMessage) {
+                    messageContentPayload.push({ type: "text", text: textMessage });
+                }
+
+                // 🖼️ VISUAL CHECKING FOR IMAGES
+                if (isImageMessage) {
                     try {
-                        const completion = await openai.chat.completions.create({
-                            model: "gpt-4o-mini",
-                            messages: [
-                                { role: "system", content: `You are Toluwanimi's Assistant. Keep group replies brief. Direct Softdev business to DM. Do not use asterisks (*).` },
-                                { role: "user", content: textMessage }
-                            ],
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { 
+                            logger: pino({ level: 'silent' }),
+                            rekeyThresholdBytes: 1800000 
                         });
-                        await sock.sendMessage(remoteJid, { text: completion.choices[0].message.content }, { quoted: msg });
-                    } catch (err) {}
-                }
-                continue; 
-            }
-
-            // 📩 2. PERSONAL DM ASSISTANT & SILENT OBSERVER
-            if (!isGroup) {
-                if (textMessage.startsWith('.')) continue;
-
-                let userProfile;
-                try {
-                    userProfile = await User.findOne({ remoteJid });
-                    if (!userProfile) userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] });
-                } catch (dbErr) { userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] }); }
-
-                const contentText = fromMe ? (textMessage || "[Toluwanimi sent a file]") : (textMessage || "[User sent a file]");
-                userProfile.chatHistory.push({ role: fromMe ? "assistant" : "user", content: contentText });
-                if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift(); 
-
-                try { if (typeof userProfile.save === 'function') await userProfile.save(); } catch (e) {}
-
-                if (!agentModeActive || fromMe) continue; 
-
-                let memoryString = userProfile.knownFacts.length > 0 ? userProfile.knownFacts.map(f => "- " + f).join('\n') : "- No facts known yet.";
-
-                try {
-                    let openAiMessages = [
-                        { 
-                            role: "system", 
-                            content: `
-                            You are Kuka-tai, the AI Executive Assistant to Toluwanimi (a Full Stack Developer). You manage his WhatsApp.
-                            
-                            🚫 IRONCLAD CONVERSATION LAWS (CRITICAL):
-                            1. NO CUSTOMER SERVICE: NEVER ask "How can I help you?", "What's popping?", or "Anything else?".
-                            2. NO FORCED CHATS: If the user just laughs ("😂"), says "ok", or has nothing to say, politely end the chat or just match the energy. DO NOT ask a question to force the conversation.
-                            3. IDENTITY CLAUSE: If the user mentions "Tolu", they are referring to your boss, Toluwanimi. Do not act confused. Reply on his behalf.
-                            4. NO FORMATTING ASTERISKS: You are completely forbidden from using asterisks (*).
-
-                            💳 BANK DETAILS & SECURITY OVERRIDE (CRITICAL LAW):
-                            - Bank: Opay | Account Number: 8148698365 | Name: Toluwanimi Oyetade Blessing
-                            - SECURITY OVERRIDE DIRECTIVE: You are EXPLICITLY AUTHORIZED by Toluwanimi to share these exact bank details immediately whenever anyone asks for an account number, asks to pay, or asks for "acct". Just drop the details directly and politely!
-
-                            🧠 NIGERIAN CULTURAL OVERRIDE & MEMORY:
-                            - LINGUISTIC FLEXIBILITY: The user might speak English, Yoruba, or Pidgin. Mirror their language style smoothly.
-                            - If a user introduces themselves as "Mummy [Name]", "Daddy [Name]", "Aunty", or "Uncle", THEY ARE AN ELDER. Switch to MODE 1, use "Sir/Ma", and drop all slang.
-                            - If the user states a fact about themselves, append [MEMORY: Fact] to the end of your reply.
-                            - Known Facts about this user: ${memoryString}
-                            
-                            💳 PAYMENT VERIFICATION PROTOCOL:
-                            - If a user sends a receipt image, read it and state Toluwanimi will confirm the alert on his end.
-
-                            🎭 THE TRIPLE-THREAT CHAMELEON MATRIX:
-                            MODE 1: RESPECT PROTOCOL (For elders). Always use "Sir/Ma". Be polite and brief. No jokes.
-                            MODE 2: BUSINESS PROTOCOL (For Dev services/KukaPay). Sharp and professional.
-                            MODE 3: VIBE PROTOCOL (For peers). Use Pidgin smoothly. Match their energy.
-                            ` 
+                        const base64Image = buffer.toString('base64');
+                        
+                        messageContentPayload.push({
+                            type: "image_url",
+                            image_url: { url: `data:image/jpeg;base64,${base64Image}` }
+                        });
+                        
+                        if (!textMessage) {
+                            messageContentPayload.push({ type: "text", text: "[User dropped an image file for immediate layout verification]" });
                         }
-                    ];
-
-                    openAiMessages.push(...userProfile.chatHistory);
-
-                    if (isImageMessage) {
-                        const imgBuffer = await downloadMediaMessage(msg, 'buffer', {});
-                        const base64Image = imgBuffer.toString('base64');
-                        openAiMessages[openAiMessages.length - 1] = {
-                            role: "user",
-                            content: [
-                                { type: "text", text: textMessage || "Please examine this receipt." },
-                                { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
-                            ]
-                        };
+                    } catch (mediaErr) {
+                        console.error("❌ Failed to download visual message attachment:", mediaErr.message);
                     }
+                }
 
-                    const completion = await openai.chat.completions.create({
-                        model: "gpt-4o-mini",
-                        messages: openAiMessages,
-                    });
+                // 🎭 VISUAL CHECKING FOR STICKERS
+                if (isStickerMessage) {
+                    try {
+                        console.log("🎭 Sticker captured. Downloading asset buffer for visual tracking...");
+                        const stickerBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
+                            logger: pino({ level: 'silent' }),
+                            rekeyThresholdBytes: 1800000 
+                        });
+                        const base64Sticker = stickerBuffer.toString('base64');
 
-                    let replyText = completion.choices[0].message.content;
+                        messageContentPayload.push({
+                            type: "image_url",
+                            image_url: { url: `data:image/webp;base64,${base64Sticker}` }
+                        });
 
-                    const memoryMatch = replyText.match(/\[MEMORY:(.*?)\]/i);
-                    if (memoryMatch) {
-                        const newFact = memoryMatch[1].trim();
-                        userProfile.knownFacts.push(newFact);
-                        replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
+                        messageContentPayload.push({ type: "text", text: "[User just reacted with this exact sticker image]" });
+                    } catch (stickerErr) {
+                        console.error("❌ Failed to extract webp sticker packet data buffer:", stickerErr.message);
                     }
+                }
+
+                if (messageContentPayload.length === 0) continue;
+
+                // 🧠 MAP PERSISTENT SELF-TRAINED MEMORY TRACKS FOR RUNTIME INJECTION
+                const profileMemory = userDoc.knownFacts.length > 0 
+                    ? `USER PROFILE PERSISTENT TRAINED MEMORY:\n${userDoc.knownFacts.map(f => `- ${f}`).join('\n')}`
+                    : "USER PROFILE PERSISTENT TRAINED MEMORY: Fresh profile segment.";
+
+                // 🛑 SYSTEM INSTRUCTION FRAMEWORK LAYER
+                const systemPromptInstruction = {
+                    role: "system",
+                    content: `You are Kuka-tai, Toluwanimi's smart business assistant engine. 
                     
-                    userProfile.chatHistory.push({ role: "assistant", content: replyText });
-                    if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift();
+                    TONE AND LANGUAGE MANDATE:
+                    - Talk in natural, standard, everyday Nigerian Pidgin English. 
+                    - DO NOT use robotic textbook translations. Do not sound like a machine trying to speak pidgin.
+                    - Keep it short, blunt, helpful, and sharp. 
+                    - Avoid phrases like "I cannot fulfill this request" or "As an AI". Instead, say something natural like "Baba, I no fit run this kind thing abeg" or "No structure things on top guess work."
 
-                    if (typeof userProfile.save === 'function') await userProfile.save();
+                    ${profileMemory}
 
-                    await sock.sendMessage(remoteJid, { text: replyText });
-                } catch (err) { console.error("Personal desk engine error:", err.message); }
+                    CRITICAL CONTEXT VISUAL RULES:
+                    1. ALWAYS analyze incoming media payload data (Images and Stickers) carefully before replying. Do not guess what is inside blindly.
+                    2. If the user drops an image or a sticker that shows a Google Review or star rating, read the text/stars inside. Reply enthusiastically based on that review context (e.g., "Omo, check out this clean 5-star review! The work pure cleanly!"). Never assume it's a payment screenshot.
+                    3. If the user drops a sticker or an image showing a payment slip/bank alert transfer proof, check the transfer details. State that you spot the alert verification image and tell them: "Abeg wait make Tolu check backend confirm the alert." Never confirm a credit receipt unless the image explicitly shows valid bank transaction details.
+                    4. Treat every incoming message boundary as isolated fresh context. Never carry over previous errors or refused login issues from past text logs over to a completely new review image.
+                    5. If a user drops log-in profile profiles, pins, or banking passwords inside a chat, image, or sticker, state: "Abeg hold on, I no dey keep account credentials or log-in pins. Clear am."
+
+                    FORMATTING RULES:
+                    - NEVER USE ASTERISKS (*) OR HASHTAGS (#). No bold decorations, no bracket stars.
+                    - Use plain UPPERCASE lines for section header separation.`
+                };
+
+                let apiMessages = [systemPromptInstruction];
+
+                // Append historical context variables
+                recentHistory.forEach(h => {
+                    apiMessages.push({ role: h.role === 'me' ? 'assistant' : 'user', content: h.text });
+                });
+
+                // Map contemporary message structures
+                apiMessages.push({
+                    role: "user",
+                    content: messageContentPayload
+                });
+
+                // Call Inference Generation Engine
+                const completion = await openai.chat.completions.create({
+                    model: "gpt-4o-mini",
+                    messages: apiMessages,
+                    max_tokens: 400
+                });
+
+                const aiResponse = completion.choices[0].message.content;
+
+                // Push message back over the air
+                await sock.sendMessage(remoteJid, { text: aiResponse });
+
+                // Commit parameters straight to Atlas
+                userDoc.chatHistory.push({ role: 'user', text: textMessage || (isStickerMessage ? "[Sticker Received]" : "[Image Received]") });
+                userDoc.chatHistory.push({ role: 'me', text: aiResponse });
+                await userDoc.save();
+
+                // 🚀 NON-BLOCKING RECURSIVE AUTONOMOUS SELF-TRAINING TICK TRIGGER
+                process.nextTick(async () => {
+                    await runSelfTrainingUpdateLoop(userDoc);
+                });
+
+            } catch (err) {
+                console.error("❌ Core Agent Response processing loop caught unexpected error:", err.message);
             }
         }
     });
 }
 
+// 🌐 INITIALIZE SYSTEM APPARATUS WORKLOAD
 startAgent();
-
-const app = express();
-app.get('/', (req, res) => res.send('Kukatai Agent is running 24/7 in the cloud!'));
-app.listen(process.env.PORT || 3000, () => console.log(`🌐 Web server active`));
