@@ -351,7 +351,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
             return true;
         }
 
-        // 🛡️ STATE GUARD FIX: Ensure we have the bankCode before verifying
+        // STATE GUARD FIX: Ensure we have the bankCode before verifying
         if (!vendor.tempData || !vendor.tempData.bankCode) {
             vendor.onboardingStep = "WAITING_BANK";
             await vendor.save();
@@ -423,7 +423,6 @@ async function startKukaTai() {
         process.exit(1);
     }
 
-    // Updated session ID namespace
     const { state, saveCreds } = await useMongooseAuthState('kukatai_agent_session');
     
     let waVersion = [2, 3000, 1015901307];
@@ -438,34 +437,46 @@ async function startKukaTai() {
     const sock = makeWASocket({ 
         version: waVersion,
         auth: state, 
-        printQRInTerminal: !process.env.BOT_PHONE_NUMBER, 
+        printQRInTerminal: false, // Turned off to default to Pairing Code logic
         browser: Browsers.macOS('Chrome'),
         logger: pino({ level: 'silent' }) 
     });
     
     sock.ev.on('creds.update', saveCreds);
 
-    if (process.env.BOT_PHONE_NUMBER && !sock.authState.creds.registered) {
-        let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
-        console.log(`📱 Attempting to pair with phone number: ${phoneNumber}`);
-        
-        await delay(12000); 
-        try {
-            let code = await sock.requestPairingCode(phoneNumber);
-            console.log(`\n🔑 ==========================================`);
-            console.log(`🔑 WHATSAPP PAIRING CODE: ${code}`);
-            console.log(`🔑 ==========================================\n`);
-        } catch (err) {
-            console.error("❌ Failed to request pairing code:", err);
-        }
-    }
+    // ⚡ DEPLOYMENT FIX: Check state and trigger pairing ONLY on fresh pairing requirement events
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
+        // If the websocket emits a QR or registration request, AND we don't have a registered account in our DB:
+        if (qr && !sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER) {
+            let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
+            console.log(`📱 [kukatai-agent] Fresh session required. Requesting pairing code for: ${phoneNumber}`);
+            
+            await delay(10000); // 10s delay to ensure the socket is stable before requesting
+            try {
+                let code = await sock.requestPairingCode(phoneNumber);
+                console.log(`\n🔑 ==========================================`);
+                console.log(`🔑 KUKATAI-AGENT PAIRING CODE: ${code}`);
+                console.log(`🔑 ==========================================\n`);
+            } catch (err) {
+                console.error("❌ Failed to request pairing code:", err);
+            }
+        }
+
+        // 🔌 RECONNECTION HANDLER (Forces reconnect on fresh setups instead of closing permanently)
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            const isLoggedOut = (lastDisconnect?.error)?.output?.statusCode === DisconnectReason.loggedOut;
+            const isRegistered = sock.authState?.creds?.registered;
+
+            // Force automatic reconnection if not paired/registered yet or it wasn't a manual logout
+            const shouldReconnect = !isLoggedOut || !isRegistered;
+            
             console.log(`🔌 Connection closed. Reconnecting? ${shouldReconnect}`);
-            if (shouldReconnect) startKukaTai();
+            if (shouldReconnect) {
+                await delay(5000); // Keep rate limits safe
+                startKukaTai();
+            }
         } else if (connection === 'open') {
             console.log('🚀 kukatai-agent Engine Live and Connected to WhatsApp!');
             startSupabaseListener(sock);
