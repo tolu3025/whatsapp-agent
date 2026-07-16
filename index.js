@@ -89,11 +89,16 @@ function startSupabaseListener(sock) {
 // ==========================================
 async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText) {
     const senderJid = msg.key.remoteJid;
+    console.log(`[STATE MACHINE] Entering setup for: ${senderJid}`);
+    
     let vendor = await Vendor.findOne({ phoneNumber: senderJid });
     if (!vendor) {
         vendor = new Vendor({ phoneNumber: senderJid });
         await vendor.save();
+        console.log(`[STATE MACHINE] Created brand new vendor entry for ${senderJid}`);
     }
+
+    console.log(`[STATE MACHINE] Current step for ${senderJid}: "${vendor.onboardingStep}"`);
 
     // Direct /setrules Command
     if (lowerText.startsWith('/setrules ')) {
@@ -113,14 +118,15 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
     }
 
     // Trigger onboarding sequence
-    const triggerWords = ["register", "setup", "onboard", "sign up", "get started", "create account"];
+    const triggerWords = ["register", "setup", "onboard", "sign up", "get started", "create account", "/signup", "/sign up"];
     const matchesTrigger = triggerWords.some(word => lowerText.includes(word));
 
-    if ((matchesTrigger && vendor.onboardingStep === "IDLE") || vendor.onboardingStep === "TRIGGERED") {
+    if ((matchesTrigger && vendor.onboardingStep === "IDLE") || vendor.onboardingStep === "TRIGGERED" || (matchesTrigger && !vendor.onboardingStep)) {
         vendor.onboardingStep = "WAITING_BIZ_NAME";
         vendor.tempData = {};
         await vendor.save();
         await sock.sendMessage(senderJid, { text: "Welcome! Let's get your business set up on KukaPay. 🚀\n\nFirst, what is your **Business Name**? (Just reply with the name)" });
+        console.log(`[STATE MACHINE] Prompted business name to ${senderJid}`);
         return true;
     }
 
@@ -173,6 +179,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
                 });
             }
         } catch (err) {
+            console.error("[STATE MACHINE] Account Verification Error:", err.message);
             await sock.sendMessage(senderJid, { text: "❌ Verification failed. Re-enter your 10-digit account number:" });
         }
         return true;
@@ -205,11 +212,11 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
                 vendor.tempData = {};
                 await vendor.save();
 
-                // 🎯 THE COMPREHENSIVE VENDOR TRAINING CHECKLIST
                 await sock.sendMessage(senderJid, { 
                     text: `🎉 *REGISTRATION COMPLETE!* 🎉\n\nYour KukaPay AI Merchant profile is live for *${vendor.businessName}*! 🚀\n\nHere is your **Quick-Start Checklist** to configure your AI Personal Assistant so it can start making sales for you:\n\n---\n\n### 💬 1. Teach Your AI How to Sell (Rules & FAQs)\nTell me your custom business rules, prices, tone of voice, or FAQ guidelines using the \`/setrules\` command.\n👉 *Example:* \`/setrules We sell premium sneakers. Air Force 1 is ₦45,000, Crocs are ₦15,000. Always speak in a friendly tone, offer a 5% discount if they buy two, and tell them to DM us to pay.\`\n\n### 👥 2. Link Your WhatsApp Group\nTo let your AI assist, answer customer questions, and take orders in your group:\n👉 *Step A:* Send me the command \`/linkgroup\` in this private chat.\n👉 *Step B:* Add this bot number to your WhatsApp Group, and then type \`/here\` inside that group chat.\n\n### 📸 3. Upload Your Product Catalog / Promo Pics\nSimply send or forward product photos or marketing flyers directly to this DM. I will automatically save them and cycle through them to post beautiful promotional updates in your group!\n\n---\n\n💡 *Remember:* I am your AI assistant. You can ask me questions right here in this DM whenever you need help setting up!` 
                 });
             } catch (err) {
+                console.error("[STATE MACHINE] Flutterwave Subaccount Error:", err.message);
                 await sock.sendMessage(senderJid, { text: "❌ Gateway error. Reply YES to try again." });
             }
         } else {
@@ -243,6 +250,7 @@ async function startKukaTai() {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log(`🔌 Connection closed. Reconnecting? ${shouldReconnect}`);
             if (shouldReconnect) startKukaTai();
         } else if (connection === 'open') {
             console.log('🚀 KukaPay Dynamic PA Engine Live!');
@@ -251,134 +259,147 @@ async function startKukaTai() {
     });
 
     sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const senderJid = msg.key.remoteJid;
-        const isGroup = senderJid.endsWith('@g.us');
-        const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-        const lowerText = textMessage.trim().toLowerCase();
-
-        // 1️⃣ HANDLE PRIVATE DM (STRICT TARGETED CODES & ONBOARDED VENDORS ONLY)
-        if (!isGroup) {
-            let vendor = await Vendor.findOne({ phoneNumber: senderJid });
+        try {
+            const msg = m.messages[0];
+            if (!msg.message) return;
             
-            // Checking for registration/setup intent
-            const naturalRegisterRegex = /register|onboard|sign\s?up|get\s?started|setup|set\s?up|create\s?account/i;
-            const matchesTrigger = naturalRegisterRegex.test(lowerText) || lowerText.startsWith('/setrules ') || lowerText === '/linkgroup';
-            const inActiveOnboarding = vendor && vendor.onboardingStep !== "IDLE" && vendor.onboardingStep !== "COMPLETED";
+            // Log message receipt to live tail console
+            console.log(`📩 Message Event Received! FromMe: ${msg.key.fromMe}`);
 
-            // Case A: The user is actively in the onboarding funnel OR triggers registration
-            if (matchesTrigger || inActiveOnboarding) {
-                const intercepted = await handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText);
-                if (intercepted) return;
-            } 
+            if (msg.key.fromMe) return; // Skip self-messages
+
+            const senderJid = msg.key.remoteJid;
+            const isGroup = senderJid.endsWith('@g.us');
             
-            // Case B: The vendor has COMPLETED onboarding. 
-            // They are speaking to their dedicated configuration companion.
-            else if (vendor && vendor.onboardingStep === "COMPLETED") {
-                // If they send an image, save it to their promo deck
-                if (msg.message.imageMessage) {
-                    try {
-                        await sock.sendMessage(senderJid, { text: "Saving this product flyer to your media deck... 📥" });
-                        vendor.savedPromoImages.push(JSON.stringify(msg.key));
-                        await vendor.save();
-                        await sock.sendMessage(senderJid, { text: "✅ Saved! I will cycle through this picture during scheduled group broadcasts." });
-                        return;
-                    } catch (err) {
-                        console.error("Media Save Error:", err);
+            // Advanced Text Extraction
+            const textMessage = msg.message.conversation || 
+                                msg.message.extendedTextMessage?.text || 
+                                msg.message.imageMessage?.caption || "";
+                                
+            const lowerText = textMessage.trim().toLowerCase();
+
+            console.log(`💬 Inbox Message: "${textMessage}" from [${senderJid}] | Group: ${isGroup}`);
+
+            // 1️⃣ HANDLE PRIVATE DM (STRICT TARGETED CODES & ONBOARDED VENDORS ONLY)
+            if (!isGroup) {
+                let vendor = await Vendor.findOne({ phoneNumber: senderJid });
+                
+                // Setup triggers
+                const naturalRegisterRegex = /register|onboard|sign\s?up|get\s?started|setup|set\s?up|create\s?account|\/signup|\/sign\s?up/i;
+                const matchesTrigger = naturalRegisterRegex.test(lowerText) || lowerText.startsWith('/setrules ') || lowerText === '/linkgroup';
+                const inActiveOnboarding = vendor && vendor.onboardingStep !== "IDLE" && vendor.onboardingStep !== "COMPLETED";
+
+                console.log(`🔍 Routing DM Check -> matchesTrigger: ${matchesTrigger}, inActiveOnboarding: ${inActiveOnboarding}, exists: ${!!vendor}`);
+
+                // Case A: User is onboarding or wants to onboard
+                if (matchesTrigger || inActiveOnboarding) {
+                    console.log(`⚡ Routing to Onboarding State Machine for: ${senderJid}`);
+                    const intercepted = await handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText);
+                    if (intercepted) return;
+                } 
+                
+                // Case B: Registered Vendor talking to configuration companion
+                else if (vendor && vendor.onboardingStep === "COMPLETED") {
+                    if (msg.message.imageMessage) {
+                        try {
+                            await sock.sendMessage(senderJid, { text: "Saving this product flyer to your media deck... 📥" });
+                            vendor.savedPromoImages.push(JSON.stringify(msg.key));
+                            await vendor.save();
+                            await sock.sendMessage(senderJid, { text: "✅ Saved! I will cycle through this picture during scheduled group broadcasts." });
+                            return;
+                        } catch (err) {
+                            console.error("Media Save Error:", err);
+                        }
                     }
-                }
 
-                // AI PA replies to the registered vendor to help them customize their brand
-                try {
-                    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-                        model: "gpt-4o-mini",
-                        messages: [
-                            { 
-                                role: "system", 
-                                content: `You are the executive AI assistant for "${vendor.businessName}". You are talking directly to your owner/vendor. Help them configure rules, understand how to link groups, or answer any of their business setup questions professionally.` 
-                            },
-                            { role: "user", content: textMessage }
-                        ],
-                        max_tokens: 250
-                    }, { headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` } });
-
-                    await sock.sendMessage(senderJid, { text: response.data.choices[0].message.content });
-                } catch (err) {
-                    console.error("Vendor Owner Chat Error:", err.message);
-                }
-            } 
-            
-            // Case C: Unregistered user sending standard messages (e.g., "Hi", "Hello")
-            else {
-                // Ignore completely. No response sent, saving token costs and keeping the inbox clean!
-                return;
-            }
-        }
-
-        // 2️⃣ HANDLE GROUP INTERACTION & TRIGGER-BASED ENGAGEMENT
-        if (isGroup) {
-            const vendor = await Vendor.findOne({ targetGroupId: senderJid });
-            
-            // Allow capturing the target group identifier
-            if (lowerText === '/here') {
-                const senderNum = msg.key.participant.split('@')[0] + "@s.whatsapp.net";
-                const checkVendor = await Vendor.findOne({ phoneNumber: senderNum });
-                if (checkVendor) {
-                    checkVendor.targetGroupId = senderJid;
-                    checkVendor.onboardingStep = "COMPLETED";
-                    await checkVendor.save();
-                    await sock.sendMessage(senderJid, { text: `🎉 *AI Agent Activated for this Group!* I will now manage customer inquiries in "${checkVendor.businessName}" using their custom rules.` });
-                    return;
-                }
-            }
-
-            if (vendor) {
-                const botJid = sock.user.id.split(':')[0];
-                const isMentioned = textMessage.includes(`@${botJid}`);
-                const matchesKeyword = vendor.customKeywords.some(keyword => lowerText.includes(keyword));
-
-                // Process conversation if the bot is tagged or commercial keywords are matched
-                if (isMentioned || matchesKeyword) {
+                    console.log(`🤖 Consulting OpenAI GPT-4o-Mini for registered vendor: ${vendor.businessName}`);
                     try {
                         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
                             model: "gpt-4o-mini",
                             messages: [
                                 { 
                                     role: "system", 
-                                    content: `You are the friendly AI assistant for "${vendor.businessName}" managing their WhatsApp sales group. Style: Professional, polite, sales-oriented. Guidelines: ${vendor.groupRules}` 
+                                    content: `You are the executive AI assistant for "${vendor.businessName}". You are talking directly to your owner/vendor. Help them configure rules, understand how to link groups, or answer any of their business setup questions professionally.` 
                                 },
-                                { role: "user", content: `From ${msg.pushName || "Customer"}: ${textMessage}` }
+                                { role: "user", content: textMessage }
                             ],
-                            max_tokens: 150
+                            max_tokens: 250
                         }, { headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` } });
 
-                        await sock.sendMessage(senderJid, { text: response.data.choices[0].message.content }, { quoted: msg });
+                        await sock.sendMessage(senderJid, { text: response.data.choices[0].message.content });
                     } catch (err) {
-                        console.error("Group AI Error:", err.message);
+                        console.error("Vendor Owner Chat Error:", err.message);
+                    }
+                } 
+                
+                // Case C: Unregistered user chat banter
+                else {
+                    console.log(`🔇 Ignoring message from unregistered contact (${senderJid}) to protect OpenAI costs.`);
+                    return;
+                }
+            }
+
+            // 2️⃣ HANDLE GROUP INTERACTION & TRIGGER-BASED ENGAGEMENT
+            if (isGroup) {
+                const vendor = await Vendor.findOne({ targetGroupId: senderJid });
+                
+                if (lowerText === '/here') {
+                    const senderNum = msg.key.participant.split('@')[0] + "@s.whatsapp.net";
+                    const checkVendor = await Vendor.findOne({ phoneNumber: senderNum });
+                    if (checkVendor) {
+                        checkVendor.targetGroupId = senderJid;
+                        checkVendor.onboardingStep = "COMPLETED";
+                        await checkVendor.save();
+                        await sock.sendMessage(senderJid, { text: `🎉 *AI Agent Activated for this Group!* I will now manage customer inquiries in "${checkVendor.businessName}" using their custom rules.` });
+                        return;
                     }
                 }
 
-                // ⏳ ACTIVITY-DRIVEN PROMOTIONAL BLASTS (No active cron jobs required)
-                const now = new Date();
-                const hoursSinceLastBlast = (now - new Date(vendor.lastGroupBlast)) / (1000 * 60 * 60);
+                if (vendor) {
+                    const botJid = sock.user.id.split(':')[0];
+                    const isMentioned = textMessage.includes(`@${botJid}`);
+                    const matchesKeyword = vendor.customKeywords.some(keyword => lowerText.includes(keyword));
 
-                if (hoursSinceLastBlast >= vendor.blastIntervalHours) {
-                    vendor.lastGroupBlast = now;
-                    await vendor.save();
+                    if (isMentioned || matchesKeyword) {
+                        try {
+                            const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+                                model: "gpt-4o-mini",
+                                messages: [
+                                    { 
+                                        role: "system", 
+                                        content: `You are the friendly AI assistant for "${vendor.businessName}" managing their WhatsApp sales group. Style: Professional, polite, sales-oriented. Guidelines: ${vendor.groupRules}` 
+                                    },
+                                    { role: "user", content: `From ${msg.pushName || "Customer"}: ${textMessage}` }
+                                ],
+                                max_tokens: 150
+                            }, { headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` } });
 
-                    if (vendor.savedPromoImages.length > 0) {
-                        const randomImageKey = JSON.parse(vendor.savedPromoImages[Math.floor(Math.random() * vendor.savedPromoImages.length)]);
-                        
-                        // Forward the image effortlessly from our cache directly to the group
-                        await sock.forwardMessage(senderJid, randomImageKey);
-                        await sock.sendMessage(senderJid, { 
-                            text: `✨ *Special highlight from ${vendor.businessName}:* DM us directly to grab this today! 🛍️` 
-                        });
+                            await sock.sendMessage(senderJid, { text: response.data.choices[0].message.content }, { quoted: msg });
+                        } catch (err) {
+                            console.error("Group AI Error:", err.message);
+                        }
+                    }
+
+                    // Promo Blasts
+                    const now = new Date();
+                    const hoursSinceLastBlast = (now - new Date(vendor.lastGroupBlast)) / (1000 * 60 * 60);
+
+                    if (hoursSinceLastBlast >= vendor.blastIntervalHours) {
+                        vendor.lastGroupBlast = now;
+                        await vendor.save();
+
+                        if (vendor.savedPromoImages.length > 0) {
+                            const randomImageKey = JSON.parse(vendor.savedPromoImages[Math.floor(Math.random() * vendor.savedPromoImages.length)]);
+                            await sock.forwardMessage(senderJid, randomImageKey);
+                            await sock.sendMessage(senderJid, { 
+                                text: `✨ *Special highlight from ${vendor.businessName}:* DM us directly to grab this today! 🛍️` 
+                            });
+                        }
                     }
                 }
             }
+        } catch (globalErr) {
+            console.error("🚨 Fatal Error inside messages.upsert receiver:", globalErr);
         }
     });
 }
