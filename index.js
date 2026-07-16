@@ -412,23 +412,17 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
 }
 
 // ==========================================
-// 🚀 MAIN BAILEYS BOOTSTRAP (CORRECT PAIRING)
+// 🚀 MAIN BAILEYS BOOTSTRAP (STABILIZED)
 // ==========================================
 async function startKukaTai() {
     try {
-        await mongoose.connect(process.env.MONGODB_URI);
-        console.log("🔋 MongoDB Connected Successfully!");
+        if (mongoose.connection.readyState === 0) {
+            await mongoose.connect(process.env.MONGODB_URI);
+            console.log("🔋 MongoDB Connected Successfully!");
+        }
     } catch (err) {
         console.error("❌ Database Connection Error:", err.message);
         process.exit(1);
-    }
-
-    // Forcefully clear previous unlinked session credentials on initial boot
-    try {
-        await BaileysAuth.deleteMany({});
-        console.log("🧹 Previous session data cleared for a fresh pairing sequence.");
-    } catch (e) {
-        console.log("⚠️ Session clearing error:", e.message);
     }
 
     const { state, saveCreds } = await useMongooseAuthState('kukatai_agent_session');
@@ -449,13 +443,13 @@ async function startKukaTai() {
         browser: Browsers.macOS('Desktop'), 
         logger: pino({ level: 'silent' }),
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 0,
-        keepAliveIntervalMs: 30000
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000,
+        retryRequestDelayMs: 5000
     });
     
     sock.ev.on('creds.update', saveCreds);
 
-    // Prevent recursive or concurrent pairing request signals
     let hasRequestedPairingCode = false;
 
     sock.ev.on('connection.update', async (update) => {
@@ -467,7 +461,8 @@ async function startKukaTai() {
             console.log(`📱 [kukatai-agent] Challenge generated. Requesting pairing code for: ${phoneNumber}`);
             
             try {
-                await delay(6000); // Give socket connection a moment to stabilize completely
+                // Generous stabilization wait so WhatsApp doesn't throw a immediate 428/disconnect
+                await delay(10000); 
                 let code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n🔑 ==========================================`);
                 console.log(`🔑 KUKATAI-AGENT PAIRING CODE: ${code}`);
@@ -481,15 +476,22 @@ async function startKukaTai() {
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error)?.output?.statusCode;
             const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-            const shouldReconnect = !isLoggedOut;
+            const isBadSession = statusCode === 428;
             
-            console.log(`🔌 Connection closed (Code: ${statusCode}). Reconnecting? ${shouldReconnect}`);
-            if (shouldReconnect) {
-                // If it fails or drops during linking, rest longer to bypass rate limits
-                const reconnectDelay = hasRequestedPairingCode ? 15000 : 8000;
-                await delay(reconnectDelay); 
-                startKukaTai();
+            console.log(`🔌 Connection closed (Code: ${statusCode}). Reconnecting in 15 seconds...`);
+
+            if (isLoggedOut || isBadSession) {
+                console.log("🧹 Invalid session detected (428/Logout). Purging database auth tokens for a clean start...");
+                try {
+                    await BaileysAuth.deleteMany({});
+                } catch (e) {
+                    console.log("⚠️ Error wiping credentials DB:", e.message);
+                }
             }
+
+            // Prevent rapid infinite loops by setting a safe 15-second cooldown delay on restarts
+            await delay(15000);
+            startKukaTai();
         } else if (connection === 'open') {
             console.log('🚀 kukatai-agent Engine Live and Connected to WhatsApp!');
             startSupabaseListener(sock);
