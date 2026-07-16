@@ -121,7 +121,7 @@ async function useMongooseAuthState(sessionId) {
 // ==========================================
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => { res.status(200).send("kukatai-agent Active."); });
+app.get('/', (req, res) => { res.status(200).send("KukaPay Active."); });
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => { console.log(`🌐 Express health server on Port ${PORT}`); });
 
@@ -141,34 +141,36 @@ const COMMON_BANKS = {
 // ⚡ FLUTTERWAVE AUTO-DETECT INTEGRATION (v3/v4)
 // ==========================================
 
+// Check which version keys are available
 const isV4Enabled = () => !!(process.env.FLW_CLIENT_ID && process.env.FLW_CLIENT_SECRET);
 
+// Helper for generating dynamic OAuth 2.0 Access Token (for v4 flows)
 async function getFlutterwaveV4Token() {
-    const url = 'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token';
+    const url = 'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token'; //
     const payload = new URLSearchParams({
         client_id: process.env.FLW_CLIENT_ID,
         client_secret: process.env.FLW_CLIENT_SECRET,
-        grant_type: 'client_credentials'
+        grant_type: 'client_credentials' //
     });
 
     const response = await axios.post(url, payload.toString(), {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' } //
     });
     
-    return response.data.access_token;
+    return response.data.access_token; //
 }
 
-// Unified Bank Account Resolution
+// Unified Bank Account Resolution (No more 404s!)
 async function resolveBankAccount(bankCode, accountNumber) {
     if (isV4Enabled()) {
         console.log("⚡ [Flutterwave] Executing via v4 API");
         const token = await getFlutterwaveV4Token();
         const baseUrl = process.env.NODE_ENV === 'production' 
-            ? 'https://f4bexperience.flutterwave.com' 
-            : 'https://developersandbox-api.flutterwave.com';
+            ? 'https://f4bexperience.flutterwave.com' //
+            : 'https://developersandbox-api.flutterwave.com'; //
 
         const response = await axios.post(
-            `${baseUrl}/banks/account-resolve`, 
+            `${baseUrl}/banks/account-resolve`, //
             {
                 account: {
                     code: bankCode,
@@ -178,28 +180,28 @@ async function resolveBankAccount(bankCode, accountNumber) {
             },
             {
                 headers: {
-                    Authorization: `Bearer ${token}`, 
+                    Authorization: `Bearer ${token}`, //
                     'Content-Type': 'application/json'
                 }
             }
         );
-        return { success: true, accountName: response.data.data.account_name };
+        return { success: true, accountName: response.data.data.account_name }; //
     } else {
         console.log("⚡ [Flutterwave] Executing via v3 API");
         const response = await axios.post(
-            'https://api.flutterwave.com/v3/accounts/resolve', 
+            'https://api.flutterwave.com/v3/accounts/resolve', //
             {
-                account_number: accountNumber, 
-                account_bank: bankCode 
+                account_number: accountNumber, //
+                account_bank: bankCode //
             },
             {
                 headers: {
-                    Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, 
+                    Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, //
                     'Content-Type': 'application/json'
                 }
             }
         );
-        return { success: true, accountName: response.data.data.account_name };
+        return { success: true, accountName: response.data.data.account_name }; //
     }
 }
 
@@ -209,8 +211,8 @@ async function createSubaccount(vendorTemp) {
         console.log("⚡ [Flutterwave] Creating v4 Payout Subaccount");
         const token = await getFlutterwaveV4Token();
         const baseUrl = process.env.NODE_ENV === 'production' 
-            ? 'https://f4bexperience.flutterwave.com' 
-            : 'https://developersandbox-api.flutterwave.com';
+            ? 'https://f4bexperience.flutterwave.com' //
+            : 'https://developersandbox-api.flutterwave.com'; //
 
         const response = await axios.post(
             `${baseUrl}/payout-subaccounts`,
@@ -218,12 +220,12 @@ async function createSubaccount(vendorTemp) {
                 account_bank: vendorTemp.bankCode,
                 account_number: vendorTemp.accountNumber,
                 business_name: vendorTemp.businessName,
-                business_email: `${vendorTemp.businessName.replace(/\s+/g, '').toLowerCase()}@kukatai.com`,
+                business_email: `${vendorTemp.businessName.replace(/\s+/g, '').toLowerCase()}@kukapay.com`,
                 country: "NG"
             },
             {
                 headers: {
-                    Authorization: `Bearer ${token}`, 
+                    Authorization: `Bearer ${token}`, //
                     'Content-Type': 'application/json'
                 }
             }
@@ -232,19 +234,19 @@ async function createSubaccount(vendorTemp) {
     } else {
         console.log("⚡ [Flutterwave] Creating v3 Collection Subaccount");
         const response = await axios.post(
-            'https://api.flutterwave.com/v3/subaccounts', 
+            'https://api.flutterwave.com/v3/subaccounts', //
             {
                 account_bank: vendorTemp.bankCode,
                 account_number: vendorTemp.accountNumber,
                 business_name: vendorTemp.businessName,
-                business_email: `${vendorTemp.businessName.replace(/\s+/g, '').toLowerCase()}@kukatai.com`,
+                business_email: `${vendorTemp.businessName.replace(/\s+/g, '').toLowerCase()}@kukapay.com`,
                 split_type: "percentage",
                 split_value: 0.03,
                 country: "NG"
             },
             {
                 headers: {
-                    Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, 
+                    Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, //
                     'Content-Type': 'application/json'
                 }
             }
@@ -275,7 +277,7 @@ function startSupabaseListener(sock) {
                         await vendor.save();
 
                         await sock.sendMessage(vendorPhone, {
-                            text: `🔔 *Kukatai Agent Instant Credit!* 🔔\n\nYour account has been credited with *₦${amount}*!\n📈 Updated Balance: *₦${vendor.dashboardBalance}*`
+                            text: `🔔 *KukaPay Instant Credit!* 🔔\n\nYour account has been credited with *₦${amount}*!\n📈 Updated Balance: *₦${vendor.dashboardBalance}*`
                         });
                     }
                 } catch (err) {
@@ -318,7 +320,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         vendor.onboardingStep = "WAITING_BIZ_NAME";
         vendor.tempData = {};
         await vendor.save();
-        await sock.sendMessage(senderJid, { text: "Welcome! Let's get your business set up on kukatai-agent. 🚀\n\nFirst, what is your **Business Name**? (Just reply with the name)" });
+        await sock.sendMessage(senderJid, { text: "Welcome! Let's get your business set up on KukaPay. 🚀\n\nFirst, what is your **Business Name**? (Just reply with the name)" });
         return true;
     }
 
@@ -350,8 +352,9 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
             await sock.sendMessage(senderJid, { text: "❌ Must be exactly 10 digits. Try again:" });
             return true;
         }
-
-        // STATE GUARD FIX: Ensure we have the bankCode before verifying
+        
+        // 🛡️ FIXED STATE GUARD FOR BANK AUTHORISATION RESOLUTION:
+        // Ensure tempData and the specific bankCode selected in the previous step are valid before firing resolveBankAccount()
         if (!vendor.tempData || !vendor.tempData.bankCode) {
             vendor.onboardingStep = "WAITING_BANK";
             await vendor.save();
@@ -361,6 +364,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
 
         await sock.sendMessage(senderJid, { text: "Verifying account details... 🔍" });
         try {
+            // Safe execution of auto-detected lookup
             const verifyRes = await resolveBankAccount(vendor.tempData.bankCode, accountNumber);
 
             if (verifyRes && verifyRes.success) {
@@ -382,6 +386,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
     if (vendor.onboardingStep === "CONFIRMATION") {
         if (lowerText === 'yes') {
             try {
+                // Safe subaccount creation logic
                 const subaccountId = await createSubaccount(vendor.tempData);
 
                 vendor.businessName = vendor.tempData.businessName;
@@ -394,11 +399,11 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
                 await vendor.save();
 
                 await sock.sendMessage(senderJid, { 
-                    text: `🎉 *REGISTRATION COMPLETE!* 🎉\n\nYour kukatai-agent Merchant profile is live for *${vendor.businessName}*! 🚀\n\nHere is your **Quick-Start Checklist** to configure your AI Personal Assistant so it can start making sales for you:\n\n---\n\n### 💬 1. Teach Your AI How to Sell (Rules & FAQs)\nTell me your custom business rules, prices, tone of voice, or FAQ guidelines using the \`/setrules\` command.\n👉 *Example:* \`/setrules We sell premium sneakers. Air Force 1 is ₦45,000, Crocs are ₦15,000. Always speak in a friendly tone, offer a 5% discount if they buy two, and tell them to DM us to pay.\`\n\n### 👥 2. Link Your WhatsApp Group\nTo let your AI assist, answer customer questions, and take orders in your group:\n👉 *Step A:* Send me the command \`/linkgroup\` in this private chat.\n👉 *Step B:* Add this bot number to your WhatsApp Group, and then type \`/here\` inside that group chat.\n\n### 📸 3. Upload Your Product Catalog / Promo Pics\nSimply send or forward product photos or marketing flyers directly to this DM. I will automatically save them and cycle through them to post beautiful promotional updates in your group!\n\n---\n\n💡 *Remember:* I am your AI assistant. You can ask me questions right here in this DM whenever you need help setting up!` 
+                    text: `🎉 *REGISTRATION COMPLETE!* 🎉\n\nYour KukaPay AI Merchant profile is live for *${vendor.businessName}*! 🚀\n\nHere is your **Quick-Start Checklist** to configure your AI Personal Assistant so it can start making sales for you:\n\n---\n\n### 💬 1. Teach Your AI How to Sell (Rules & FAQs)\nTell me your custom business rules, prices, tone of voice, or FAQ guidelines using the \`/setrules\` command.\n👉 *Example:* \`/setrules We sell premium sneakers. Air Force 1 is ₦45,000, Crocs are ₦15,000. Always speak in a friendly tone, offer a 5% discount if they buy two, and tell them to DM us to pay.\`\n\n### 👥 2. Link Your WhatsApp Group\nTo let your AI assist, answer customer questions, and take orders in your group:\n👉 *Step A:* Send me the command \`/linkgroup\` in this private chat.\n👉 *Step B:* Add this bot number to your WhatsApp Group, and then type \`/here\` inside that group chat.\n\n### 📸 3. Upload Your Product Catalog / Promo Pics\nSimply send or forward product photos or marketing flyers directly to this DM. I will automatically save them and cycle through them to post beautiful promotional updates in your group!\n\n---\n\n💡 *Remember:* I am your AI assistant. You can ask me questions right here in this DM whenever you need help setting up!` 
                 });
             } catch (err) {
                 console.error("Subaccount Creation Error:", err.response?.data || err.message);
-                await sock.sendMessage(senderJid, { text: "❌ Gateway error during registration. Reply YES to try again." });
+                await sock.sendMessage(senderJid, { text: "❌ Gateway error. Reply YES to try again." });
             }
         } else {
             vendor.onboardingStep = "IDLE";
@@ -412,26 +417,24 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
 }
 
 // ==========================================
-// 🚀 MAIN BAILEYS BOOTSTRAP (STABILIZED)
+// 🚀 MAIN BAILEYS BOOTSTRAP
 // ==========================================
 async function startKukaTai() {
     try {
-        if (mongoose.connection.readyState === 0) {
-            await mongoose.connect(process.env.MONGODB_URI);
-            console.log("🔋 MongoDB Connected Successfully!");
-        }
+        await mongoose.connect(process.env.MONGODB_URI);
+        console.log("🔋 MongoDB Connected Successfully!");
     } catch (err) {
         console.error("❌ Database Connection Error:", err.message);
         process.exit(1);
     }
 
-    const { state, saveCreds } = await useMongooseAuthState('kukatai_agent_session');
+    const { state, saveCreds } = await useMongooseAuthState('kuka_pay_agent_session');
     
     let waVersion = [2, 3000, 1015901307];
     try {
         const { version } = await fetchLatestWaWebVersion();
         if (version) waVersion = version;
-        console.log("📡 Fetched WA Web version:", waVersion.join('.'));
+        console.log(`📡 Fetched WA Web version: ${waVersion.join('.')}`);
     } catch (e) {
         console.log(`⚠️ Version fetch failed, utilizing stable fallback version.`);
     }
@@ -439,61 +442,38 @@ async function startKukaTai() {
     const sock = makeWASocket({ 
         version: waVersion,
         auth: state, 
-        printQRInTerminal: false,
-        browser: Browsers.macOS('Desktop'), 
-        logger: pino({ level: 'silent' }),
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000,
-        retryRequestDelayMs: 5000
+        printQRInTerminal: !process.env.BOT_PHONE_NUMBER, 
+        browser: Browsers.macOS('Chrome'),
+        logger: pino({ level: 'silent' }) 
     });
     
     sock.ev.on('creds.update', saveCreds);
 
-    let hasRequestedPairingCode = false;
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr && !sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER && !hasRequestedPairingCode) {
-            hasRequestedPairingCode = true;
-            let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
-            console.log(`📱 [kukatai-agent] Challenge generated. Requesting pairing code for: ${phoneNumber}`);
-            
-            try {
-                // Generous stabilization wait so WhatsApp doesn't throw a immediate 428/disconnect
-                await delay(10000); 
-                let code = await sock.requestPairingCode(phoneNumber);
-                console.log(`\n🔑 ==========================================`);
-                console.log(`🔑 KUKATAI-AGENT PAIRING CODE: ${code}`);
-                console.log(`🔑 ==========================================\n`);
-            } catch (err) {
-                console.error("❌ Failed to request pairing code safely:", err.message);
-                hasRequestedPairingCode = false; 
-            }
+    if (process.env.BOT_PHONE_NUMBER && !sock.authState.creds.registered) {
+        let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
+        console.log(`📱 Attempting to pair with phone number: ${phoneNumber}`);
+        
+        await delay(12000); 
+        try {
+            let code = await sock.requestPairingCode(phoneNumber);
+            console.log(`\n🔑 ==========================================`);
+            console.log(`🔑 WHATSAPP PAIRING CODE: ${code}`);
+            console.log(`🔑 ==========================================\n`);
+        } catch (err) {
+            console.error("❌ Failed to request pairing code:", err);
         }
+    }
 
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
         if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-            const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-            const isBadSession = statusCode === 428;
-            
-            console.log(`🔌 Connection closed (Code: ${statusCode}). Reconnecting in 15 seconds...`);
-
-            if (isLoggedOut || isBadSession) {
-                console.log("🧹 Invalid session detected (428/Logout). Purging database auth tokens for a clean start...");
-                try {
-                    await BaileysAuth.deleteMany({});
-                } catch (e) {
-                    console.log("⚠️ Error wiping credentials DB:", e.message);
-                }
+            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log(`🔌 Connection closed. Reconnecting? ${shouldReconnect}`);
+            if (shouldReconnect) {
+                startKukaTai();
             }
-
-            // Prevent rapid infinite loops by setting a safe 15-second cooldown delay on restarts
-            await delay(15000);
-            startKukaTai();
         } else if (connection === 'open') {
-            console.log('🚀 kukatai-agent Engine Live and Connected to WhatsApp!');
+            console.log('🚀 KukaPay Engine Live and Connected to WhatsApp!');
             startSupabaseListener(sock);
         }
     });
@@ -536,7 +516,7 @@ async function startKukaTai() {
                         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
                             model: "gpt-4o-mini",
                             messages: [
-                                { role: "system", content: `You are the executive assistant for "${vendor.businessName}". Provide professional help configuring rules, linking groups, etc. for their kukatai-agent configuration.` },
+                                { role: "system", content: `You are the executive assistant for "${vendor.businessName}". Provide professional help configuring rules, linking groups, etc. for their KukaPay configuration.` },
                                 { role: "user", content: textMessage }
                             ],
                             max_tokens: 250
