@@ -3,7 +3,9 @@ const {
     DisconnectReason, 
     BufferJSON, 
     initAuthCreds,
-    Browsers 
+    Browsers,
+    fetchLatestWaWebVersion, // Ensures we use the absolute latest WA Web protocol to avoid 428 errors
+    delay // Built-in Baileys delay helper
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const mongoose = require('mongoose');
@@ -39,7 +41,7 @@ const VendorSchema = new mongoose.Schema({
     jid: { type: String, required: true, unique: true },
     businessName: String,
     bankName: String,
-    bankCode: String, // Added to store mapped bank code
+    bankCode: String, 
     accountNumber: String,
     verifiedName: String,
     onboardingStep: { type: String, default: 'IDLE' }, 
@@ -176,14 +178,26 @@ async function useMongoAuthState(sessionId) {
 // 🤖 WHATSAPP AGENT INITIALIZATION
 // ==========================================
 async function startWhatsAppBot() {
-    console.log("⚙️ Initializing dynamic MongoDB-backed session...");
+    console.log("⚙️ Fetching latest WhatsApp Web protocol...");
     
+    // 🛡️ Resolve 428 errors by forcing Baileys to identify as the newest verified WA build
+    let waVersion = [2, 3000, 1015901307]; 
+    try {
+        const { version } = await fetchLatestWaWebVersion();
+        if (version) waVersion = version;
+        console.log(`📡 WhatsApp Web version fetched successfully: ${waVersion.join('.')}`);
+    } catch (e) {
+        console.log(`⚠️ Failed to fetch live WA Web version, defaulting to stable fallback version.`);
+    }
+
+    console.log("⚙️ Initializing dynamic MongoDB-backed session...");
     const { state, saveCreds } = await useMongoAuthState("kukatai_session");
 
     const sock = makeWASocket({
+        version: waVersion,
         auth: state,
         printQRInTerminal: false, 
-        browser: Browsers.macOS('Chrome') 
+        browser: Browsers.macOS('Chrome') // Simulates genuine browser traffic to prevent handshake closures
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -196,17 +210,20 @@ async function startWhatsAppBot() {
         }
 
         if (!sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER) {
-            setTimeout(async () => {
-                try {
-                    let code = await sock.requestPairingCode(process.env.BOT_PHONE_NUMBER);
-                    code = code?.match(/.{1,4}/g)?.join('-') || code;
-                    console.log(`\n🔑 ==========================================`);
-                    console.log(`🔑 USE THIS WHATSAPP PAIRING CODE: ${code}`);
-                    console.log(`🔑 ==========================================\n`);
-                } catch (err) {
-                    console.error("Error generating pairing code:", err);
-                }
-            }, 5000); 
+            // 🛡️ Introduce a mandatory 10-second delay so that the WebSocket fully matures
+            // and opens with WhatsApp servers before requesting pairing credentials.
+            console.log("⏳ Waiting 10s for the WebSocket to mature before requesting pairing code...");
+            await delay(10000);
+
+            try {
+                let code = await sock.requestPairingCode(process.env.BOT_PHONE_NUMBER);
+                code = code?.match(/.{1,4}/g)?.join('-') || code;
+                console.log(`\n🔑 ==========================================`);
+                console.log(`🔑 USE THIS WHATSAPP PAIRING CODE: ${code}`);
+                console.log(`🔑 ==========================================\n`);
+            } catch (err) {
+                console.error("❌ Error generating pairing code:", err);
+            }
         }
 
         if (connection === 'close') {
@@ -223,6 +240,9 @@ async function startWhatsAppBot() {
         }
     });
 
+    // ==========================================
+    // 📩 INCOMING MESSAGE EVENT HANDLER (FILTERED)
+    // ==========================================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         
@@ -297,7 +317,6 @@ async function startWhatsAppBot() {
                     await sock.sendMessage(jid, { text: `🔍 Verifying account details with Flutterwave, please hold...` });
 
                     try {
-                        // 🛠️ FIX 1 & 2: Sending a POST request with correct raw json parameters
                         const flwResponse = await axios.post(
                             `https://api.flutterwave.com/v3/accounts/resolve`,
                             { 
