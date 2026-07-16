@@ -22,12 +22,17 @@ app.listen(PORT, () => console.log(`🌐 Express health server on Port ${PORT}`)
 // ==========================================
 // 🍃 MONGODB MODELS FOR AUTHENTICATION & VENDORS
 // ==========================================
-const MongoURI = process.env.MONGO_URI;
+// Fallback to support both environment variable names
+const MongoURI = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+if (!MongoURI) {
+    console.error("⚠️ ERROR: MongoDB URI is missing! Please set MONGODB_URI in Render environment variables.");
+}
 
 // Schema for storing Baileys Auth Session
 const SessionSchema = new mongoose.Schema({
     id: { type: String, required: true, unique: true },
-    data: { type: String, required: true } // Stores credentials as serialized BufferJSON
+    data: { type: String, required: true } 
 });
 const Session = mongoose.model('Session', SessionSchema);
 
@@ -38,16 +43,11 @@ const VendorSchema = new mongoose.Schema({
     bankName: String,
     accountNumber: String,
     verifiedName: String,
-    onboardingStep: { type: String, default: 'IDLE' }, // IDLE, WAITING_NAME, WAITING_BANK, WAITING_ACCOUNT, WAITING_VERIFY, COMPLETED
+    onboardingStep: { type: String, default: 'IDLE' }, 
     isLinked: { type: Boolean, default: false },
     linkedGroupJid: String
 });
 const Vendor = mongoose.model('Vendor', VendorSchema);
-
-// Connect Mongo
-mongoose.connect(MongoURI)
-    .then(() => console.log("🔋 MongoDB Connected Successfully!"))
-    .catch(err => console.error("❌ MongoDB Connection Error:", err));
 
 // ==========================================
 // 🔑 CUSTOM MONGODB AUTH STATE FOR BAILEYS
@@ -190,7 +190,7 @@ async function startWhatsAppBot() {
 
         const jid = msg.key.remoteJid;
 
-        // 🚫 1. FILTER & IGNORE GROUP CHATS & STATUS UPDATES TO PREVENT FLOODING RENDER LOGS
+        // 🚫 FILTER & IGNORE GROUP CHATS & STATUS UPDATES
         if (jid === 'status@broadcast' || jid.endsWith('@g.us')) {
             return; 
         }
@@ -306,5 +306,16 @@ async function startWhatsAppBot() {
     });
 }
 
-// Start Engine
-startWhatsAppBot();
+// ==========================================
+// 🔌 INITIALIZE DATABASE CONNECTION FIRST
+// ==========================================
+console.log("🔌 Connecting to MongoDB Database...");
+mongoose.connect(MongoURI)
+    .then(() => {
+        console.log("🔋 MongoDB Connected Successfully!");
+        // Only start WhatsApp Bot once MongoDB is 100% online
+        startWhatsAppBot();
+    })
+    .catch(err => {
+        console.error("❌ MongoDB Connection Error:", err);
+    });
