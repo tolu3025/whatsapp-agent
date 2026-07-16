@@ -437,23 +437,19 @@ async function startKukaTai() {
     const sock = makeWASocket({ 
         version: waVersion,
         auth: state, 
-        printQRInTerminal: false, // Turned off to default to Pairing Code logic
-        browser: Browsers.macOS('Chrome'),
+        printQRInTerminal: false,
+        browser: Browsers.appropriate('Chrome'), // Safer user-agent prevents pairing disconnect loops
         logger: pino({ level: 'silent' }) 
     });
     
     sock.ev.on('creds.update', saveCreds);
 
-    // ⚡ DEPLOYMENT FIX: Check state and trigger pairing ONLY on fresh pairing requirement events
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        // If the websocket emits a QR or registration request, AND we don't have a registered account in our DB:
-        if (qr && !sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER) {
-            let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
-            console.log(`📱 [kukatai-agent] Fresh session required. Requesting pairing code for: ${phoneNumber}`);
-            
-            await delay(10000); // 10s delay to ensure the socket is stable before requesting
+    // ⚡ PAIRING GENERATOR (Triggered directly outside of connection loops to avoid handshake failures)
+    if (!sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER) {
+        let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
+        console.log(`📱 [kukatai-agent] Fresh session. Requesting pairing code for: ${phoneNumber}`);
+        
+        setTimeout(async () => {
             try {
                 let code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n🔑 ==========================================`);
@@ -462,19 +458,23 @@ async function startKukaTai() {
             } catch (err) {
                 console.error("❌ Failed to request pairing code:", err);
             }
-        }
+        }, 10000); // Wait 10 seconds after boot to let socket handshake establish cleanly
+    }
 
-        // 🔌 RECONNECTION HANDLER (Forces reconnect on fresh setups instead of closing permanently)
+    // 🔌 Connection Update Handler
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+
         if (connection === 'close') {
-            const isLoggedOut = (lastDisconnect?.error)?.output?.statusCode === DisconnectReason.loggedOut;
-            const isRegistered = sock.authState?.creds?.registered;
-
-            // Force automatic reconnection if not paired/registered yet or it wasn't a manual logout
-            const shouldReconnect = !isLoggedOut || !isRegistered;
+            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+            const isLoggedOut = statusCode === DisconnectReason.loggedOut;
             
-            console.log(`🔌 Connection closed. Reconnecting? ${shouldReconnect}`);
+            // Reconnect only if it is not a manual log out
+            const shouldReconnect = !isLoggedOut;
+            
+            console.log(`🔌 Connection closed (Code: ${statusCode}). Reconnecting? ${shouldReconnect}`);
             if (shouldReconnect) {
-                await delay(5000); // Keep rate limits safe
+                await delay(10000); // Increased safety delay to 10s to prevent rapid-fire crashing
                 startKukaTai();
             }
         } else if (connection === 'open') {
