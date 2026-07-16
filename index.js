@@ -13,7 +13,7 @@ require('dotenv').config();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ==========================================
-// 🗄️ UPGRADED BUSINESS & PA SCHEMA (Multi-Tenant)
+// 🗄️ MULTI-TENANT VENDOR SCHEMA
 // ==========================================
 const VendorSchema = new mongoose.Schema({
     phoneNumber: { type: String, required: true, unique: true }, // WhatsApp JID of the Vendor
@@ -41,7 +41,7 @@ const Vendor = mongoose.models.Vendor || mongoose.model('Vendor', VendorSchema);
 // 🌐 EXPRESS SERVER (Keep-Alive & Port Binding)
 // ==========================================
 const app = express();
-app.get('/', (req, res) => { res.status(200).send("KukaPay Multi-Tenant PA Engine Active."); });
+app.get('/', (req, res) => { res.status(200).send("KukaPay Vendor-First PA Engine Active."); });
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => { console.log(`🌐 Express health server on Port ${PORT}`); });
 
@@ -72,7 +72,7 @@ function startSupabaseListener(sock) {
                         vendor.dashboardBalance += amount;
                         await vendor.save();
 
-                        // Notify the dynamic vendor of their credit alert!
+                        // Notify the specific vendor of their credit alert!
                         await sock.sendMessage(vendorPhone, {
                             text: `🔔 *KukaPay Instant Credit!* 🔔\n\nYour account has been credited with *₦${amount}*!\n📈 Updated Balance: *₦${vendor.dashboardBalance}*`
                         });
@@ -112,7 +112,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         return true;
     }
 
-    // Trigger onboarding sequence manually (or caught by regex / AI classifiers)
+    // Trigger onboarding sequence
     const triggerWords = ["register", "setup", "onboard", "sign up", "get started", "create account"];
     const matchesTrigger = triggerWords.some(word => lowerText.includes(word));
 
@@ -178,7 +178,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         return true;
     }
 
-    // STEP 4: Confirm and Spin up Subaccount + Send Onboarding Checklist
+    // STEP 4: Confirm and Spin up Subaccount + Send Interactive Onboarding Checklist
     if (vendor.onboardingStep === "CONFIRMATION") {
         if (lowerText === 'yes') {
             try {
@@ -259,73 +259,61 @@ async function startKukaTai() {
         const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
         const lowerText = textMessage.trim().toLowerCase();
 
-        // 1️⃣ HANDLE PRIVATE DM (VENDOR SETUP & CUSTOMER INQUIRIES)
+        // 1️⃣ HANDLE PRIVATE DM (STRICT TARGETED CODES & ONBOARDED VENDORS ONLY)
         if (!isGroup) {
-            const activeVendor = await Vendor.findOne({ phoneNumber: senderJid });
-            const inFunnel = activeVendor && activeVendor.onboardingStep !== "IDLE" && activeVendor.onboardingStep !== "COMPLETED";
-
-            // Natural Language Check: Did they type something that looks like setup?
+            let vendor = await Vendor.findOne({ phoneNumber: senderJid });
+            
+            // Checking for registration/setup intent
             const naturalRegisterRegex = /register|onboard|sign\s?up|get\s?started|setup|set\s?up|create\s?account/i;
-            const matchesLocalTrigger = naturalRegisterRegex.test(lowerText) || lowerText.startsWith('/setrules ') || lowerText === '/linkgroup';
+            const matchesTrigger = naturalRegisterRegex.test(lowerText) || lowerText.startsWith('/setrules ') || lowerText === '/linkgroup';
+            const inActiveOnboarding = vendor && vendor.onboardingStep !== "IDLE" && vendor.onboardingStep !== "COMPLETED";
 
-            // Catch and save marketing images forwarded by the vendor
-            if (activeVendor && msg.message.imageMessage) {
-                try {
-                    await sock.sendMessage(senderJid, { text: "Saving this product flyer to your media deck... 📥" });
-                    activeVendor.savedPromoImages.push(JSON.stringify(msg.key));
-                    await activeVendor.save();
-                    await sock.sendMessage(senderJid, { text: "✅ Saved! I will cycle through this picture during scheduled group broadcasts." });
-                    return;
-                } catch (err) {
-                    console.error("Media Save Error:", err);
-                }
-            }
-
-            if (matchesLocalTrigger || inFunnel) {
+            // Case A: The user is actively in the onboarding funnel OR triggers registration
+            if (matchesTrigger || inActiveOnboarding) {
                 const intercepted = await handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText);
                 if (intercepted) return;
-            } else {
-                // ==========================================
-                // 🧠 CONVERSATIONAL AI (Context-Aware Multi-Tenant Routing)
-                // ==========================================
-                try {
-                    const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
-                    const vendor = await Vendor.findOne({ phoneNumber: myJid });
-                    
-                    // If vendor profile exists, act as their specialized store PA.
-                    // If not, act as KukaPay's corporate onboarding assistant.
-                    const systemPrompt = vendor 
-                        ? `You are the executive PA for "${vendor.businessName}". Rules: ${vendor.groupRules}. Your main objective is to handle client requests, close sales, provide payment instructions, and be helpful and professional.`
-                        : `You are the friendly onboarding assistant for KukaPay. If the user wants to sign up, start, or register a business account, reply enthusiastically and append exactly '[TRIGGER_ONBOARDING]' to the end of your response.`;
+            } 
+            
+            // Case B: The vendor has COMPLETED onboarding. 
+            // They are speaking to their dedicated configuration companion.
+            else if (vendor && vendor.onboardingStep === "COMPLETED") {
+                // If they send an image, save it to their promo deck
+                if (msg.message.imageMessage) {
+                    try {
+                        await sock.sendMessage(senderJid, { text: "Saving this product flyer to your media deck... 📥" });
+                        vendor.savedPromoImages.push(JSON.stringify(msg.key));
+                        await vendor.save();
+                        await sock.sendMessage(senderJid, { text: "✅ Saved! I will cycle through this picture during scheduled group broadcasts." });
+                        return;
+                    } catch (err) {
+                        console.error("Media Save Error:", err);
+                    }
+                }
 
+                // AI PA replies to the registered vendor to help them customize their brand
+                try {
                     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
                         model: "gpt-4o-mini",
                         messages: [
-                            { role: "system", content: systemPrompt },
+                            { 
+                                role: "system", 
+                                content: `You are the executive AI assistant for "${vendor.businessName}". You are talking directly to your owner/vendor. Help them configure rules, understand how to link groups, or answer any of their business setup questions professionally.` 
+                            },
                             { role: "user", content: textMessage }
                         ],
                         max_tokens: 250
                     }, { headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` } });
 
-                    let aiReply = response.data.choices[0].message.content;
-
-                    // Catch dynamic onboarding intent flagged by AI
-                    if (aiReply.includes('[TRIGGER_ONBOARDING]')) {
-                        aiReply = aiReply.replace('[TRIGGER_ONBOARDING]', '').trim();
-                        
-                        const prospectiveVendor = activeVendor || new Vendor({ phoneNumber: senderJid });
-                        prospectiveVendor.onboardingStep = "TRIGGERED";
-                        await prospectiveVendor.save();
-
-                        await sock.sendMessage(senderJid, { text: aiReply });
-                        await handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText);
-                        return;
-                    }
-
-                    await sock.sendMessage(senderJid, { text: aiReply });
+                    await sock.sendMessage(senderJid, { text: response.data.choices[0].message.content });
                 } catch (err) {
-                    console.error("DM AI Error:", err.message);
+                    console.error("Vendor Owner Chat Error:", err.message);
                 }
+            } 
+            
+            // Case C: Unregistered user sending standard messages (e.g., "Hi", "Hello")
+            else {
+                // Ignore completely. No response sent, saving token costs and keeping the inbox clean!
+                return;
             }
         }
 
@@ -359,7 +347,7 @@ async function startKukaTai() {
                             messages: [
                                 { 
                                     role: "system", 
-                                    content: `You are the friendly AI assistant for "${vendor.businessName}" managing their WhatsApp sales group. Style: Professional, polite, sales-oriented. Strictly follow these guidelines: ${vendor.groupRules}` 
+                                    content: `You are the friendly AI assistant for "${vendor.businessName}" managing their WhatsApp sales group. Style: Professional, polite, sales-oriented. Guidelines: ${vendor.groupRules}` 
                                 },
                                 { role: "user", content: `From ${msg.pushName || "Customer"}: ${textMessage}` }
                             ],
