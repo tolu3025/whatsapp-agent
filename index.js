@@ -21,7 +21,6 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 // 🗄️ MONGOOSE SCHEMAS (Multi-Tenant & Session)
 // ==========================================
 
-// 1. Vendor Profile Schema
 const VendorSchema = new mongoose.Schema({
     phoneNumber: { type: String, required: true, unique: true }, 
     businessName: { type: String },
@@ -44,7 +43,6 @@ const VendorSchema = new mongoose.Schema({
 
 const Vendor = mongoose.models.Vendor || mongoose.model('Vendor', VendorSchema);
 
-// 2. Persistent WhatsApp Authentication Session Schema (Fixes Render Disconnects)
 const BaileysAuthSchema = new mongoose.Schema({
     keyId: { type: String, required: true, unique: true },
     value: { type: String, required: true }
@@ -140,54 +138,121 @@ const COMMON_BANKS = {
 };
 
 // ==========================================
-// ⚡ FLUTTERWAVE V4 API INTEGRATION (FIXED)
+// ⚡ FLUTTERWAVE AUTO-DETECT INTEGRATION (v3/v4)
 // ==========================================
 
-// Dynamically sets host based on Environment Settings (no more 404 errors)
-const FLW_BASE_URL = process.env.NODE_ENV === 'production' 
-    ? 'https://f4bexperience.flutterwave.com'      // Live Production Host
-    : 'https://developersandbox-api.flutterwave.com'; // Sandbox Host
+// Check which version keys are available
+const isV4Enabled = () => !!(process.env.FLW_CLIENT_ID && process.env.FLW_CLIENT_SECRET);
 
-// Generates dynamic, short-lived OAuth 2.0 Access Token
+// Helper for generating dynamic OAuth 2.0 Access Token (for v4 flows)
 async function getFlutterwaveV4Token() {
     const url = 'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token'; //
     const payload = new URLSearchParams({
         client_id: process.env.FLW_CLIENT_ID,
         client_secret: process.env.FLW_CLIENT_SECRET,
-        grant_type: 'client_credentials'
+        grant_type: 'client_credentials' //
     });
 
     const response = await axios.post(url, payload.toString(), {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' } //
     });
     
     return response.data.access_token; //
 }
 
-// v4 Bank Account Resolution Utility (Structured payload)
-async function resolveBankAccountV4(bankCode, accountNumber) {
-    const token = await getFlutterwaveV4Token();
-    const url = `${FLW_BASE_URL}/banks/account-resolve`; //
+// Unified Bank Account Resolution (No more 404s!)
+async function resolveBankAccount(bankCode, accountNumber) {
+    if (isV4Enabled()) {
+        console.log("⚡ [Flutterwave] Executing via v4 API");
+        const token = await getFlutterwaveV4Token();
+        const baseUrl = process.env.NODE_ENV === 'production' 
+            ? 'https://f4bexperience.flutterwave.com' //
+            : 'https://developersandbox-api.flutterwave.com'; //
 
-    const response = await axios.post(
-        url,
-        {
-            account: {
-                code: bankCode,
-                number: accountNumber
+        const response = await axios.post(
+            `${baseUrl}/banks/account-resolve`, //
+            {
+                account: {
+                    code: bankCode,
+                    number: accountNumber
+                },
+                currency: "NGN"
             },
-            currency: "NGN"
-        },
-        {
-            headers: {
-                Authorization: `Bearer ${token}`, //
-                'Content-Type': 'application/json',
-                'X-Trace-Id': `trace-${Date.now()}`
+            {
+                headers: {
+                    Authorization: `Bearer ${token}`, //
+                    'Content-Type': 'application/json'
+                }
             }
-        }
-    );
+        );
+        return { success: true, accountName: response.data.data.account_name }; //
+    } else {
+        console.log("⚡ [Flutterwave] Executing via v3 API");
+        const response = await axios.post(
+            'https://api.flutterwave.com/v3/accounts/resolve', //
+            {
+                account_number: accountNumber, //
+                account_bank: bankCode //
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, //
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return { success: true, accountName: response.data.data.account_name }; //
+    }
+}
 
-    return response.data; // Expected format: { status: "success", data: { account_name, ... } }
+// Unified Subaccount Creation
+async function createSubaccount(vendorTemp) {
+    if (isV4Enabled()) {
+        console.log("⚡ [Flutterwave] Creating v4 Payout Subaccount");
+        const token = await getFlutterwaveV4Token();
+        const baseUrl = process.env.NODE_ENV === 'production' 
+            ? 'https://f4bexperience.flutterwave.com' //
+            : 'https://developersandbox-api.flutterwave.com'; //
+
+        const response = await axios.post(
+            `${baseUrl}/payout-subaccounts`,
+            {
+                account_bank: vendorTemp.bankCode,
+                account_number: vendorTemp.accountNumber,
+                business_name: vendorTemp.businessName,
+                business_email: `${vendorTemp.businessName.replace(/\s+/g, '').toLowerCase()}@kukapay.com`,
+                country: "NG"
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${token}`, //
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data.data.subaccount_id;
+    } else {
+        console.log("⚡ [Flutterwave] Creating v3 Collection Subaccount");
+        const response = await axios.post(
+            'https://api.flutterwave.com/v3/subaccounts', //
+            {
+                account_bank: vendorTemp.bankCode,
+                account_number: vendorTemp.accountNumber,
+                business_name: vendorTemp.businessName,
+                business_email: `${vendorTemp.businessName.replace(/\s+/g, '').toLowerCase()}@kukapay.com`,
+                split_type: "percentage",
+                split_value: 0.03,
+                country: "NG"
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, //
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data.data.subaccount_id;
+    }
 }
 
 // ==========================================
@@ -289,11 +354,11 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         }
         await sock.sendMessage(senderJid, { text: "Verifying account details... 🔍" });
         try {
-            // Safe execution of dynamic v4 Flutterwave bank account lookup
-            const verifyRes = await resolveBankAccountV4(vendor.tempData.bankCode, accountNumber);
+            // Safe execution of auto-detected lookup
+            const verifyRes = await resolveBankAccount(vendor.tempData.bankCode, accountNumber);
 
-            if (verifyRes && verifyRes.status === 'success') {
-                const accountName = verifyRes.data.account_name; //
+            if (verifyRes && verifyRes.success) {
+                const accountName = verifyRes.accountName;
                 vendor.tempData = { ...vendor.tempData, accountNumber, accountName };
                 vendor.onboardingStep = "CONFIRMATION";
                 await vendor.save();
@@ -311,27 +376,14 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
     if (vendor.onboardingStep === "CONFIRMATION") {
         if (lowerText === 'yes') {
             try {
-                // Fetch credentials token for subaccount creation tasks
-                const token = await getFlutterwaveV4Token();
-                const subRes = await axios.post(
-                    'https://api.flutterwave.com/v3/subaccounts',
-                    {
-                        account_bank: vendor.tempData.bankCode,
-                        account_number: vendor.tempData.accountNumber,
-                        business_name: vendor.tempData.businessName,
-                        business_email: `${vendor.tempData.businessName.replace(/\s+/g, '').toLowerCase()}@kukapay.com`,
-                        split_type: "percentage",
-                        split_value: 0.03,
-                        country: "NG"
-                    },
-                    { headers: { Authorization: `Bearer ${token}` } }
-                );
+                // Safe subaccount creation logic
+                const subaccountId = await createSubaccount(vendor.tempData);
 
                 vendor.businessName = vendor.tempData.businessName;
                 vendor.bankCode = vendor.tempData.bankCode;
                 vendor.accountNumber = vendor.tempData.accountNumber;
                 vendor.accountName = vendor.tempData.accountName;
-                vendor.subaccountId = subRes.data.data.subaccount_id;
+                vendor.subaccountId = subaccountId;
                 vendor.onboardingStep = "COMPLETED";
                 vendor.tempData = {};
                 await vendor.save();
@@ -340,7 +392,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
                     text: `🎉 *REGISTRATION COMPLETE!* 🎉\n\nYour KukaPay AI Merchant profile is live for *${vendor.businessName}*! 🚀\n\nHere is your **Quick-Start Checklist** to configure your AI Personal Assistant so it can start making sales for you:\n\n---\n\n### 💬 1. Teach Your AI How to Sell (Rules & FAQs)\nTell me your custom business rules, prices, tone of voice, or FAQ guidelines using the \`/setrules\` command.\n👉 *Example:* \`/setrules We sell premium sneakers. Air Force 1 is ₦45,000, Crocs are ₦15,000. Always speak in a friendly tone, offer a 5% discount if they buy two, and tell them to DM us to pay.\`\n\n### 👥 2. Link Your WhatsApp Group\nTo let your AI assist, answer customer questions, and take orders in your group:\n👉 *Step A:* Send me the command \`/linkgroup\` in this private chat.\n👉 *Step B:* Add this bot number to your WhatsApp Group, and then type \`/here\` inside that group chat.\n\n### 📸 3. Upload Your Product Catalog / Promo Pics\nSimply send or forward product photos or marketing flyers directly to this DM. I will automatically save them and cycle through them to post beautiful promotional updates in your group!\n\n---\n\n💡 *Remember:* I am your AI assistant. You can ask me questions right here in this DM whenever you need help setting up!` 
                 });
             } catch (err) {
-                console.error("Subaccount Creation Error:", err.message);
+                console.error("Subaccount Creation Error:", err.response?.data || err.message);
                 await sock.sendMessage(senderJid, { text: "❌ Gateway error. Reply YES to try again." });
             }
         } else {
@@ -366,7 +418,6 @@ async function startKukaTai() {
         process.exit(1);
     }
 
-    // Dynamic Database Authentication Loader (Bypasses local files; never logs out on Render!)
     const { state, saveCreds } = await useMongooseAuthState('kuka_pay_agent_session');
     
     let waVersion = [2, 3000, 1015901307];
@@ -388,12 +439,11 @@ async function startKukaTai() {
     
     sock.ev.on('creds.update', saveCreds);
 
-    // 🔑 SECURE PHONE PAIRING LOGIC (For headless deploys)
     if (process.env.BOT_PHONE_NUMBER && !sock.authState.creds.registered) {
         let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
         console.log(`📱 Attempting to pair with phone number: ${phoneNumber}`);
         
-        await delay(12000); // Prevents instant handshake dropped packets
+        await delay(12000); 
         try {
             let code = await sock.requestPairingCode(phoneNumber);
             console.log(`\n🔑 ==========================================`);
