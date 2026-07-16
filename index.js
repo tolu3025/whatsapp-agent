@@ -13,10 +13,10 @@ require('dotenv').config();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ==========================================
-// 🗄️ UPGRADED BUSINESS & PA SCHEMA
+// 🗄️ UPGRADED BUSINESS & PA SCHEMA (Multi-Tenant)
 // ==========================================
 const VendorSchema = new mongoose.Schema({
-    phoneNumber: { type: String, required: true, unique: true }, 
+    phoneNumber: { type: String, required: true, unique: true }, // WhatsApp JID of the Vendor
     businessName: { type: String },
     bankCode: { type: String },
     accountNumber: { type: String },
@@ -27,21 +27,21 @@ const VendorSchema = new mongoose.Schema({
     tempData: { type: Object, default: {} },
     
     // PA & Group Customizations
-    targetGroupId: { type: String }, 
+    targetGroupId: { type: String }, // Bound WhatsApp Group JID
     groupRules: { type: String, default: "Be polite, showcase our products, and tell them to DM us to order." },
     customKeywords: { type: [String], default: ["price", "cost", "buy", "order", "available"] },
     lastGroupBlast: { type: Date, default: Date.now },
     blastIntervalHours: { type: Number, default: 6 }, 
-    savedPromoImages: { type: [String], default: [] } 
+    savedPromoImages: { type: [String], default: [] } // Pointers to forwarded images
 }, { timestamps: true });
 
 const Vendor = mongoose.models.Vendor || mongoose.model('Vendor', VendorSchema);
 
 // ==========================================
-// 🌐 EXPRESS SERVER
+// 🌐 EXPRESS SERVER (Keep-Alive & Port Binding)
 // ==========================================
 const app = express();
-app.get('/', (req, res) => { res.status(200).send("KukaPay PA Active with Natural Language Processing."); });
+app.get('/', (req, res) => { res.status(200).send("KukaPay Multi-Tenant PA Engine Active."); });
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => { console.log(`🌐 Express health server on Port ${PORT}`); });
 
@@ -72,6 +72,7 @@ function startSupabaseListener(sock) {
                         vendor.dashboardBalance += amount;
                         await vendor.save();
 
+                        // Notify the dynamic vendor of their credit alert!
                         await sock.sendMessage(vendorPhone, {
                             text: `🔔 *KukaPay Instant Credit!* 🔔\n\nYour account has been credited with *₦${amount}*!\n📈 Updated Balance: *₦${vendor.dashboardBalance}*`
                         });
@@ -94,16 +95,16 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         await vendor.save();
     }
 
-    // Direct Group Rules Command
+    // Direct /setrules Command
     if (lowerText.startsWith('/setrules ')) {
         const rules = textMessage.substring(10);
         vendor.groupRules = rules;
         await vendor.save();
-        await sock.sendMessage(senderJid, { text: `✅ *PA Custom Rules Updated!* Your AI will now engage groups using this style:\n\n"${rules}"` });
+        await sock.sendMessage(senderJid, { text: `✅ *PA Custom Rules Updated!* Your AI will now engage your groups using this custom style:\n\n"${rules}"` });
         return true;
     }
 
-    // Direct Group Link Command
+    // Direct /linkgroup Command
     if (lowerText === '/linkgroup') {
         vendor.onboardingStep = "WAITING_GROUP_LINK";
         await vendor.save();
@@ -111,7 +112,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         return true;
     }
 
-    // Trigger onboarding sequence manually (or caught by intent detectors)
+    // Trigger onboarding sequence manually (or caught by regex / AI classifiers)
     const triggerWords = ["register", "setup", "onboard", "sign up", "get started", "create account"];
     const matchesTrigger = triggerWords.some(word => lowerText.includes(word));
 
@@ -123,7 +124,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         return true;
     }
 
-    // Onboarding Step Machine
+    // STEP 1: Capture business name
     if (vendor.onboardingStep === "WAITING_BIZ_NAME") {
         vendor.tempData = { businessName: textMessage };
         vendor.onboardingStep = "WAITING_BANK";
@@ -132,6 +133,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         return true;
     }
 
+    // STEP 2: Capture bank name
     if (vendor.onboardingStep === "WAITING_BANK") {
         const cleanBank = lowerText.replace(/\s+/g, '');
         const bankCode = COMMON_BANKS[cleanBank];
@@ -146,6 +148,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         return true;
     }
 
+    // STEP 3: Verify bank account with Flutterwave
     if (vendor.onboardingStep === "WAITING_ACCT") {
         const accountNumber = textMessage.trim();
         if (!/^\d{10}$/.test(accountNumber)) {
@@ -175,6 +178,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         return true;
     }
 
+    // STEP 4: Confirm and Spin up Subaccount + Send Onboarding Checklist
     if (vendor.onboardingStep === "CONFIRMATION") {
         if (lowerText === 'yes') {
             try {
@@ -201,7 +205,10 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
                 vendor.tempData = {};
                 await vendor.save();
 
-                await sock.sendMessage(senderJid, { text: `🎉 *Setup Successful!* Your AI Merchant profile is live for *${vendor.businessName}*!` });
+                // 🎯 THE COMPREHENSIVE VENDOR TRAINING CHECKLIST
+                await sock.sendMessage(senderJid, { 
+                    text: `🎉 *REGISTRATION COMPLETE!* 🎉\n\nYour KukaPay AI Merchant profile is live for *${vendor.businessName}*! 🚀\n\nHere is your **Quick-Start Checklist** to configure your AI Personal Assistant so it can start making sales for you:\n\n---\n\n### 💬 1. Teach Your AI How to Sell (Rules & FAQs)\nTell me your custom business rules, prices, tone of voice, or FAQ guidelines using the \`/setrules\` command.\n👉 *Example:* \`/setrules We sell premium sneakers. Air Force 1 is ₦45,000, Crocs are ₦15,000. Always speak in a friendly tone, offer a 5% discount if they buy two, and tell them to DM us to pay.\`\n\n### 👥 2. Link Your WhatsApp Group\nTo let your AI assist, answer customer questions, and take orders in your group:\n👉 *Step A:* Send me the command \`/linkgroup\` in this private chat.\n👉 *Step B:* Add this bot number to your WhatsApp Group, and then type \`/here\` inside that group chat.\n\n### 📸 3. Upload Your Product Catalog / Promo Pics\nSimply send or forward product photos or marketing flyers directly to this DM. I will automatically save them and cycle through them to post beautiful promotional updates in your group!\n\n---\n\n💡 *Remember:* I am your AI assistant. You can ask me questions right here in this DM whenever you need help setting up!` 
+                });
             } catch (err) {
                 await sock.sendMessage(senderJid, { text: "❌ Gateway error. Reply YES to try again." });
             }
@@ -238,7 +245,7 @@ async function startKukaTai() {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startKukaTai();
         } else if (connection === 'open') {
-            console.log('🚀 KukaPay PA Engine active with Natural Onboarding!');
+            console.log('🚀 KukaPay Dynamic PA Engine Live!');
             startSupabaseListener(sock);
         }
     });
@@ -252,22 +259,22 @@ async function startKukaTai() {
         const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
         const lowerText = textMessage.trim().toLowerCase();
 
-        // 1️⃣ HANDLE PRIVATE DM (VENDOR & CLIENTS)
+        // 1️⃣ HANDLE PRIVATE DM (VENDOR SETUP & CUSTOMER INQUIRIES)
         if (!isGroup) {
             const activeVendor = await Vendor.findOne({ phoneNumber: senderJid });
             const inFunnel = activeVendor && activeVendor.onboardingStep !== "IDLE" && activeVendor.onboardingStep !== "COMPLETED";
 
-            // Natural Onboarding Regex Check (Layer 1)
+            // Natural Language Check: Did they type something that looks like setup?
             const naturalRegisterRegex = /register|onboard|sign\s?up|get\s?started|setup|set\s?up|create\s?account/i;
             const matchesLocalTrigger = naturalRegisterRegex.test(lowerText) || lowerText.startsWith('/setrules ') || lowerText === '/linkgroup';
 
-            // Allow vendor to send promo pictures
+            // Catch and save marketing images forwarded by the vendor
             if (activeVendor && msg.message.imageMessage) {
                 try {
-                    await sock.sendMessage(senderJid, { text: "Saving this image for your scheduled group promotions... 📥" });
+                    await sock.sendMessage(senderJid, { text: "Saving this product flyer to your media deck... 📥" });
                     activeVendor.savedPromoImages.push(JSON.stringify(msg.key));
                     await activeVendor.save();
-                    await sock.sendMessage(senderJid, { text: "✅ Image saved! I will cycle through this and other saved images during scheduled group blasts." });
+                    await sock.sendMessage(senderJid, { text: "✅ Saved! I will cycle through this picture during scheduled group broadcasts." });
                     return;
                 } catch (err) {
                     console.error("Media Save Error:", err);
@@ -279,15 +286,17 @@ async function startKukaTai() {
                 if (intercepted) return;
             } else {
                 // ==========================================
-                // 🧠 CONVERSATIONAL AI & INTENT CLASSIFIER (Layer 2)
+                // 🧠 CONVERSATIONAL AI (Context-Aware Multi-Tenant Routing)
                 // ==========================================
                 try {
                     const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
                     const vendor = await Vendor.findOne({ phoneNumber: myJid });
                     
+                    // If vendor profile exists, act as their specialized store PA.
+                    // If not, act as KukaPay's corporate onboarding assistant.
                     const systemPrompt = vendor 
-                        ? `You are the executive PA for "${vendor.businessName}". Rules: ${vendor.groupRules}. Close sales, provide payment details if they are ready, and be ultra-professional.`
-                        : `You are the professional setup agent for KukaPay. If the user wants to sign up, register their business, start, or set up their account, reply in a friendly tone welcoming them and append exactly '[TRIGGER_ONBOARDING]' to the very end of your message.`;
+                        ? `You are the executive PA for "${vendor.businessName}". Rules: ${vendor.groupRules}. Your main objective is to handle client requests, close sales, provide payment instructions, and be helpful and professional.`
+                        : `You are the friendly onboarding assistant for KukaPay. If the user wants to sign up, start, or register a business account, reply enthusiastically and append exactly '[TRIGGER_ONBOARDING]' to the end of your response.`;
 
                     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
                         model: "gpt-4o-mini",
@@ -295,24 +304,20 @@ async function startKukaTai() {
                             { role: "system", content: systemPrompt },
                             { role: "user", content: textMessage }
                         ],
-                        max_tokens: 200
+                        max_tokens: 250
                     }, { headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` } });
 
                     let aiReply = response.data.choices[0].message.content;
 
-                    // Intercept the Smart AI triggering request
+                    // Catch dynamic onboarding intent flagged by AI
                     if (aiReply.includes('[TRIGGER_ONBOARDING]')) {
                         aiReply = aiReply.replace('[TRIGGER_ONBOARDING]', '').trim();
                         
-                        // Instantly transition vendor state to get ready for onboarding
                         const prospectiveVendor = activeVendor || new Vendor({ phoneNumber: senderJid });
                         prospectiveVendor.onboardingStep = "TRIGGERED";
                         await prospectiveVendor.save();
 
-                        // Send conversational transition reply
                         await sock.sendMessage(senderJid, { text: aiReply });
-                        
-                        // Fire the next state loop to ask for their business name
                         await handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText);
                         return;
                     }
@@ -328,6 +333,7 @@ async function startKukaTai() {
         if (isGroup) {
             const vendor = await Vendor.findOne({ targetGroupId: senderJid });
             
+            // Allow capturing the target group identifier
             if (lowerText === '/here') {
                 const senderNum = msg.key.participant.split('@')[0] + "@s.whatsapp.net";
                 const checkVendor = await Vendor.findOne({ phoneNumber: senderNum });
@@ -335,7 +341,7 @@ async function startKukaTai() {
                     checkVendor.targetGroupId = senderJid;
                     checkVendor.onboardingStep = "COMPLETED";
                     await checkVendor.save();
-                    await sock.sendMessage(senderJid, { text: `🎉 *AI Agent Activated for this Group!* I will now assist your customers using your customized rules.` });
+                    await sock.sendMessage(senderJid, { text: `🎉 *AI Agent Activated for this Group!* I will now manage customer inquiries in "${checkVendor.businessName}" using their custom rules.` });
                     return;
                 }
             }
@@ -345,6 +351,7 @@ async function startKukaTai() {
                 const isMentioned = textMessage.includes(`@${botJid}`);
                 const matchesKeyword = vendor.customKeywords.some(keyword => lowerText.includes(keyword));
 
+                // Process conversation if the bot is tagged or commercial keywords are matched
                 if (isMentioned || matchesKeyword) {
                     try {
                         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
@@ -352,7 +359,7 @@ async function startKukaTai() {
                             messages: [
                                 { 
                                     role: "system", 
-                                    content: `You are the resident AI assistant in the business group of "${vendor.businessName}". Tone: Fun, helpful, yet business-focused. Strict Instructions: ${vendor.groupRules}` 
+                                    content: `You are the friendly AI assistant for "${vendor.businessName}" managing their WhatsApp sales group. Style: Professional, polite, sales-oriented. Strictly follow these guidelines: ${vendor.groupRules}` 
                                 },
                                 { role: "user", content: `From ${msg.pushName || "Customer"}: ${textMessage}` }
                             ],
@@ -365,6 +372,7 @@ async function startKukaTai() {
                     }
                 }
 
+                // ⏳ ACTIVITY-DRIVEN PROMOTIONAL BLASTS (No active cron jobs required)
                 const now = new Date();
                 const hoursSinceLastBlast = (now - new Date(vendor.lastGroupBlast)) / (1000 * 60 * 60);
 
@@ -374,9 +382,11 @@ async function startKukaTai() {
 
                     if (vendor.savedPromoImages.length > 0) {
                         const randomImageKey = JSON.parse(vendor.savedPromoImages[Math.floor(Math.random() * vendor.savedPromoImages.length)]);
+                        
+                        // Forward the image effortlessly from our cache directly to the group
                         await sock.forwardMessage(senderJid, randomImageKey);
                         await sock.sendMessage(senderJid, { 
-                            text: `✨ *Quick Update from KukaPay PA:* Check out this top pick! DMs are open to secure yours now! 🛍️` 
+                            text: `✨ *Special highlight from ${vendor.businessName}:* DM us directly to grab this today! 🛍️` 
                         });
                     }
                 }
