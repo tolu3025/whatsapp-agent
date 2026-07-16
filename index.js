@@ -123,7 +123,13 @@ async function fetchFcsapiForexMatrix() {
 // 🧠 ATOMIC SELF-TRAINING RECURSIVE SYNTAX ENGINE
 async function runSelfTrainingUpdateLoop(userDoc) {
     try {
-        const lastConversations = userDoc.chatHistory.slice(-6).map(c => `${c.role.toUpperCase()}: ${c.text}`).join('\n');
+        // Safe mapping for history to prevent raw object or null content breakage in self-training system
+        const lastConversations = userDoc.chatHistory
+            .slice(-6)
+            .filter(c => c && c.text && String(c.text).trim() !== "")
+            .map(c => `${c.role.toUpperCase()}: ${c.text}`)
+            .join('\n');
+            
         const activeFacts = userDoc.knownFacts.join(', ') || "None";
 
         const selfTrainingPrompt = await openai.chat.completions.create({
@@ -572,9 +578,14 @@ async function startAgent() {
 
                 let apiMessages = [systemPromptInstruction];
 
-                // Append historical context variables
+                // ✅ FIX INTEGRATED: Append historical context variables safely (Filtering out null or empty records to avoid 400 content error!)
                 recentHistory.forEach(h => {
-                    apiMessages.push({ role: h.role === 'me' ? 'assistant' : 'user', content: h.text });
+                    if (h && h.text && String(h.text).trim() !== "") {
+                        apiMessages.push({ 
+                            role: h.role === 'me' ? 'assistant' : 'user', 
+                            content: String(h.text).trim() 
+                        });
+                    }
                 });
 
                 // Map contemporary message structures
