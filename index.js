@@ -28,6 +28,7 @@ if (!mongoURI) {
 // 🗄️ DATABASE SCHEMAS
 const UserSchema = new mongoose.Schema({
     remoteJid: { type: String, required: true, unique: true },
+    isActive: { type: Boolean, default: false }, // 👈 AI remains silent until toggled ON inside a specific chat
     knownFacts: { type: [String], default: [] },
     chatHistory: { type: Array, default: [] } 
 });
@@ -90,7 +91,7 @@ async function useMongoDBAuthState() {
     };
 }
 
-let agentModeActive = true; 
+let globalAgentSwitch = true; 
 const myDmJid = "2348148698365@s.whatsapp.net";
 
 // 💱 LIVE FCSAPI FOREX ENGINE
@@ -99,7 +100,7 @@ async function fetchFcsapiForexMatrix() {
         const fxKey = process.env.FOREX_API_KEY;
         if (!fxKey) return "Error: FOREX_API_KEY environment variable is unconfigured.";
         
-        const response = await axios.get(`https://fcsapi.com/api-v3/forex/latest?id=1,2,3&access_key=${fxKey}`);
+        const response = await axios.get(`https://fcsapi.com/api-3/forex/latest?id=1,2,3&access_key=${fxKey}`);
         
         if (response.data && response.data.status && response.data.response) {
             return response.data.response.map(q => 
@@ -187,7 +188,7 @@ function startProactiveAutomationClocks(sock) {
                         
                         Synthesize the provided live market data feed into crisp, general market trends, followed immediately by listing his scheduled agenda items for the day layout.` 
                     },
-                    { role: "user", content: `Date context: 2026-07-15\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
+                    { role: "user", content: `Date context: 2026-07-16\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
                 ]
             });
             await sock.sendMessage(myDmJid, { text: `🌅 KUKA-TAI DAILY MORNING BRIEFING\n\n${completion.choices[0].message.content}` });
@@ -265,19 +266,24 @@ async function startAgent() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    if (!sock.authState.creds.registered) {
-        await delay(3000); 
+    // Ensure session retrieval delay blocks database connection locks
+    if (!sock.authState.creds || !sock.authState.creds.registered) {
+        await delay(6000); 
         const phoneNumber = "2348148698365"; 
         try {
-            const code = await sock.requestPairingCode(phoneNumber);
-            console.log(`\n🔑 WHATSAPP PAIRING CODE: ${code}\n`);
-        } catch (err) {}
+            if (!sock.authState.creds.me?.id) {
+                const code = await sock.requestPairingCode(phoneNumber);
+                console.log(`\n🔑 WHATSAPP PAIRING CODE: ${code}\n`);
+            }
+        } catch (err) {
+            console.log("ℹ️ Pairing skipped or connection actively configured.");
+        }
     }
 
     sock.ev.on('connection.update', (update) => {
         const { connection } = update;
         if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (MEDIA & VISUAL CHECKS RE-ENGINEERED)!");
+            console.log("🚀 TOLUWANIMI'S KUKA-TAI AGENT IS ONLINE & SECURE!");
             startProactiveAutomationClocks(sock); 
         }
         if (connection === 'close') startAgent();
@@ -295,10 +301,12 @@ async function startAgent() {
             const isNewsletter = remoteJid.endsWith('@newsletter');
             const fromMe = msg.key.fromMe;
             
-            const isImageMessage = !!msg.message.imageMessage;
-            const isStickerMessage = !!msg.message.stickerMessage;
-            const isAudioMessage = !!msg.message.audioMessage || !!msg.message.pttMessage;
-            
+            // Allow the bot to process administrative commands sent by you
+            if (fromMe && isGroup) continue;
+
+            // Skip status updates and newsletters entirely
+            if (isStatus || isNewsletter) continue;
+
             let textMessage = msg.message.conversation || 
                                 msg.message.extendedTextMessage?.text || 
                                 msg.message.imageMessage?.caption ||
@@ -306,47 +314,29 @@ async function startAgent() {
 
             let lowerText = textMessage.toLowerCase().trim();
 
-            // 🎙️ VOICE NOTE AUDIO PROCESSING ENGINE (WHISPER)
-            if (isAudioMessage && (!isGroup || fromMe)) {
-                try {
-                    console.log("🎙️ Audio message captured. Processing Transcription...");
-                    const audioBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
-                        logger: pino({ level: 'silent' }),
-                        rekeyThresholdBytes: 1800000 
-                    });
-                    
-                    const tempAudioFile = path.join(os.tmpdir(), `audio_${Date.now()}.ogg`);
-                    fs.writeFileSync(tempAudioFile, audioBuffer);
-
-                    const transcription = await openai.audio.transcriptions.create({
-                        file: fs.createReadStream(tempAudioFile),
-                        model: "whisper-1",
-                    });
-
-                    try { fs.unlinkSync(tempAudioFile); } catch (e) {}
-
-                    textMessage = transcription.text;
-                    lowerText = textMessage.toLowerCase().trim();
-                    console.log(`📝 Audio transcribed successfully: "${textMessage}"`);
-                } catch (audioErr) {
-                    console.error("❌ Whisper Transcription engine runtime failed:", audioErr.message);
-                }
+            // 🔄 LOAD USER AND CREATE DYNAMIC STATE DOCUMENT
+            let userDoc = await User.findOne({ remoteJid });
+            if (!userDoc) {
+                userDoc = new User({ remoteJid, isActive: false, knownFacts: [], chatHistory: [] });
+                await userDoc.save();
             }
 
-            // 🛠️ DEFENSIVE INTERNAL COMMAND HANDLING
+            // 🛠️ ADMIN CONFIGURATION COMMAND ROUTER (ONLY FOR INCOMING DIRECT CHATS FROM SENDER)
             if (fromMe && !isGroup) {
                 if (lowerText === '.agent on') {
-                    agentModeActive = true;
-                    await sock.sendMessage(remoteJid, { text: "💼 Agent Mode ON." });
+                    userDoc.isActive = true;
+                    await userDoc.save();
+                    await sock.sendMessage(remoteJid, { text: "💼 Kuka-tai is now ACTIVE and managing this chat." });
                     continue;
                 }
                 if (lowerText === '.agent off') {
-                    agentModeActive = false;
-                    await sock.sendMessage(remoteJid, { text: "👋 Agent Mode OFF." });
+                    userDoc.isActive = false;
+                    await userDoc.save();
+                    await sock.sendMessage(remoteJid, { text: "👋 Kuka-tai has been DEACTIVATED for this chat." });
                     continue;
                 }
 
-                // 📊 MANUAL MARKET TICKER FOREX SCANNER COMMAND (FCSAPI)
+                // 📊 MANUAL MARKET TICKER FOREX SCANNER COMMAND
                 if (lowerText === '.market') {
                     try {
                         await sock.sendMessage(remoteJid, { text: "⏳ Intercepting liquid exchange matrix and computing session support/resistance channels..." });
@@ -375,7 +365,7 @@ async function startAgent() {
                     continue;
                 }
                 
-                // 🧠 OpenAI-Powered Schedule Action Parser (CREATE, UPDATE, DELETE, LIST)
+                // 🧠 OpenAI-Powered Schedule Action Parser
                 if (lowerText.startsWith('.schedule')) {
                     try {
                         const commandBody = textMessage.replace(/^\.schedule/i, '').trim();
@@ -387,215 +377,20 @@ async function startAgent() {
                                 {
                                     role: "system",
                                     content: `You are a scheduling command analyzer. Classify the user's instructions into one of these actions:
-                                    1. "list" -> If the user wants to see, display, or list upcoming tasks (e.g. ".schedule list").
-                                    2. "delete" -> If they want to remove, cancel, or clear a task (e.g. ".schedule delete Friday task").
-                                    3. "update" -> If they want to change, modify, edit, or adjust an existing task's details, date, or time (e.g. ".schedule change Friday task time to 9:00").
-                                    4. "create" -> ONLY if they are describing a completely new task to log from scratch (e.g. ".schedule 2026-07-17 @ 09:00 - IFT 212 exam").
+                                    1. "list" -> If the user wants to see, display, or list upcoming tasks.
+                                    2. "delete" -> If they want to remove, cancel, or clear a task.
+                                    3. "update" -> If they want to change, modify, edit, or adjust an existing task's details.
+                                    4. "create" -> ONLY if they are describing a completely new task to log from scratch.
                                     
                                     Return a strictly structured JSON object with these keys:
                                     - "action": "create" | "update" | "delete" | "list"
                                     - "date": "YYYY-MM-DD" (Calculated correctly from context; only for create/update)
                                     - "time": "HH:MM" (24-hour format; only for create/update)
                                     - "task": "clean description" (The task details; only for create/update)
-                                    - "searchQuery": "fragment" (For delete/update. Extract the target task keyword, e.g. "IFT 212" or "Friday")
+                                    - "searchQuery": "fragment" (For delete/update. Extract the target task keyword)
                                     - "updateField": "date" | "time" | "task" | "all" (Only for update)
                                     
-                                    Current Date context: Wednesday, July 15, 2026.`
+                                    Current Date context: Thursday, July 16, 2026.`
                                 },
                                 { role: "user", content: commandBody }
                             ]
-                        });
-
-                        const data = JSON.parse(completion.choices[0].message.content);
-                        console.log("Resolved AI Schedule Action Plan:", data);
-
-                        if (data.action === "list") {
-                            const upcoming = await Schedule.find({}).sort({ date: 1, time: 1 }).limit(10);
-                            if (upcoming.length > 0) {
-                                const listStr = upcoming.map((ev, i) => `${i+1}. [${ev.date} @ ${ev.time} WAT] - ${ev.task}`).join('\n');
-                                await sock.sendMessage(remoteJid, { text: `📅 CURRENT SCHEDULED TASKS\n\n${listStr}` });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: "📅 CURRENT SCHEDULED TASKS\n\nNo scheduled tasks found in database cloud." });
-                            }
-                        } 
-                        else if (data.action === "delete") {
-                            const result = await Schedule.deleteOne({ task: { $regex: data.searchQuery, $options: 'i' } });
-                            if (result.deletedCount > 0) {
-                                await sock.sendMessage(remoteJid, { text: `🗑️ TASK DELETED SUCCESSFULLY\n\nRemoved schedule matching query: "${data.searchQuery}"` });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: `❌ TASK NOT FOUND\n\nCould not find any upcoming schedule matching: "${data.searchQuery}"` });
-                            }
-                        } 
-                        else if (data.action === "update") {
-                            const queryCondition = data.searchQuery 
-                                ? { task: { $regex: data.searchQuery, $options: 'i' } } 
-                                : { date: data.date };
-
-                            const event = await Schedule.findOne(queryCondition);
-                            if (event) {
-                                if (data.date && data.updateField !== "time" && data.updateField !== "task") event.date = data.date;
-                                if (data.time) event.time = data.time;
-                                if (data.task && data.updateField === "task") event.task = data.task;
-                                await event.save();
-                                await sock.sendMessage(remoteJid, { text: `📝 TASK UPDATED SUCCESSFULLY\n\n📅 Date: ${event.date}\n🕒 Time: ${event.time}\n📌 Task: ${event.task}` });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: `❌ TARGET TASK NOT FOUND\n\nCould not locate an active schedule matching: "${data.searchQuery || data.date}"` });
-                            }
-                        } 
-                        else if (data.action === "create") {
-                            const newEvent = new Schedule({
-                                task: data.task,
-                                date: data.date,
-                                time: data.time,
-                                alertSent: false
-                            });
-                            await newEvent.save();
-                            await sock.sendMessage(remoteJid, { text: `✅ NEW TASK LOGGED SUCCESSFULLY\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
-                        }
-                    } catch (err) {
-                        console.error("Schedule Parse Engine failed:", err.message);
-                        await sock.sendMessage(remoteJid, { text: "❌ System parsing error handling that schedule instruction format." });
-                    }
-                    continue;
-                }
-            }
-
-            // 🛑 SKIP IF AGENT IS DISABLED OR OUTSIDE VALID DIRECT MESSAGE SCOPE
-            if (!agentModeActive || isGroup || isStatus || isNewsletter) continue;
-
-            try {
-                // 🔄 FETCH OR INITIALIZE USER STATE FROM DATABASE
-                let userDoc = await User.findOne({ remoteJid });
-                if (!userDoc) {
-                    userDoc = new User({ remoteJid, knownFacts: [], chatHistory: [] });
-                }
-
-                // Limit conversation history boundary array
-                const recentHistory = userDoc.chatHistory.slice(-8);
-
-                // 🛠️ MULTIMODAL PAYLOAD FIELD EXTRACTION
-                let messageContentPayload = [];
-
-                if (textMessage) {
-                    messageContentPayload.push({ type: "text", text: textMessage });
-                }
-
-                // 🖼️ VISUAL CHECKING FOR IMAGES
-                if (isImageMessage) {
-                    try {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { 
-                            logger: pino({ level: 'silent' }),
-                            rekeyThresholdBytes: 1800000 
-                        });
-                        const base64Image = buffer.toString('base64');
-                        
-                        messageContentPayload.push({
-                            type: "image_url",
-                            image_url: { url: `data:image/jpeg;base64,${base64Image}` }
-                        });
-                        
-                        if (!textMessage) {
-                            messageContentPayload.push({ type: "text", text: "[User dropped an image file for immediate layout verification]" });
-                        }
-                    } catch (mediaErr) {
-                        console.error("❌ Failed to download visual message attachment:", mediaErr.message);
-                    }
-                }
-
-                // 🎭 VISUAL CHECKING FOR STICKERS
-                if (isStickerMessage) {
-                    try {
-                        console.log("🎭 Sticker captured. Downloading asset buffer for visual tracking...");
-                        const stickerBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
-                            logger: pino({ level: 'silent' }),
-                            rekeyThresholdBytes: 1800000 
-                        });
-                        const base64Sticker = stickerBuffer.toString('base64');
-
-                        messageContentPayload.push({
-                            type: "image_url",
-                            image_url: { url: `data:image/webp;base64,${base64Sticker}` }
-                        });
-
-                        messageContentPayload.push({ type: "text", text: "[User just reacted with this exact sticker image]" });
-                    } catch (stickerErr) {
-                        console.error("❌ Failed to extract webp sticker packet data buffer:", stickerErr.message);
-                    }
-                }
-
-                if (messageContentPayload.length === 0) continue;
-
-                // 🧠 MAP PERSISTENT SELF-TRAINED MEMORY TRACKS FOR RUNTIME INJECTION
-                const profileMemory = userDoc.knownFacts.length > 0 
-                    ? `USER PROFILE PERSISTENT TRAINED MEMORY:\n${userDoc.knownFacts.map(f => `- ${f}`).join('\n')}`
-                    : "USER PROFILE PERSISTENT TRAINED MEMORY: Fresh profile segment.";
-
-                // 🛑 SYSTEM INSTRUCTION FRAMEWORK LAYER
-                const systemPromptInstruction = {
-                    role: "system",
-                    content: `You are Kuka-tai, Toluwanimi's smart business assistant engine. 
-                    
-                    TONE AND LANGUAGE MANDATE:
-                    - Talk in natural, standard, everyday Nigerian Pidgin English. 
-                    - DO NOT use robotic textbook translations. Do not sound like a machine trying to speak pidgin.
-                    - Keep it short, blunt, helpful, and sharp. 
-                    - Avoid phrases like "I cannot fulfill this request" or "As an AI". Instead, say something natural like "Baba, I no fit run this kind thing abeg" or "No structure things on top guess work."
-
-                    ${profileMemory}
-
-                    CRITICAL CONTEXT VISUAL RULES:
-                    1. ALWAYS analyze incoming media payload data (Images and Stickers) carefully before replying. Do not guess what is inside blindly.
-                    2. If the user drops an image or a sticker that shows a Google Review or star rating, read the text/stars inside. Reply enthusiastically based on that review context (e.g., "Omo, check out this clean 5-star review! The work pure cleanly!"). Never assume it's a payment screenshot.
-                    3. If the user drops a sticker or an image showing a payment slip/bank alert transfer proof, check the transfer details. State that you spot the alert verification image and tell them: "Abeg wait make Tolu check backend confirm the alert." Never confirm a credit receipt unless the image explicitly shows valid bank transaction details.
-                    4. Treat every incoming message boundary as isolated fresh context. Never carry over previous errors or refused login issues from past text logs over to a completely new review image.
-                    5. If a user drops log-in profile profiles, pins, or banking passwords inside a chat, image, or sticker, state: "Abeg hold on, I no dey keep account credentials or log-in pins. Clear am."
-
-                    FORMATTING RULES:
-                    - NEVER USE ASTERISKS (*) OR HASHTAGS (#). No bold decorations, no bracket stars.
-                    - Use plain UPPERCASE lines for section header separation.`
-                };
-
-                let apiMessages = [systemPromptInstruction];
-
-                // Append historical context variables
-                recentHistory.forEach(h => {
-                    apiMessages.push({ role: h.role === 'me' ? 'assistant' : 'user', content: h.text });
-                });
-
-                // Map contemporary message structures
-                apiMessages.push({
-                    role: "user",
-                    content: messageContentPayload
-                });
-
-                // Call Inference Generation Engine
-                const completion = await openai.chat.completions.create({
-                    model: "gpt-4o-mini",
-                    messages: apiMessages,
-                    max_tokens: 400
-                });
-
-                const aiResponse = completion.choices[0].message.content;
-
-                // Push message back over the air
-                await sock.sendMessage(remoteJid, { text: aiResponse });
-
-                // Commit parameters straight to Atlas
-                userDoc.chatHistory.push({ role: 'user', text: textMessage || (isStickerMessage ? "[Sticker Received]" : "[Image Received]") });
-                userDoc.chatHistory.push({ role: 'me', text: aiResponse });
-                await userDoc.save();
-
-                // 🚀 NON-BLOCKING RECURSIVE AUTONOMOUS SELF-TRAINING TICK TRIGGER
-                process.nextTick(async () => {
-                    await runSelfTrainingUpdateLoop(userDoc);
-                });
-
-            } catch (err) {
-                console.error("❌ Core Agent Response processing loop caught unexpected error:", err.message);
-            }
-        }
-    });
-}
-
-// 🌐 INITIALIZE SYSTEM APPARATUS WORKLOAD
-startAgent();
