@@ -438,43 +438,42 @@ async function startKukaTai() {
         version: waVersion,
         auth: state, 
         printQRInTerminal: false,
-        browser: Browsers.appropriate('Chrome'), // Safer user-agent prevents pairing disconnect loops
+        browser: Browsers.macOS('Desktop'), // Better desktop emulation to prevent auth blocks
         logger: pino({ level: 'silent' }) 
     });
     
     sock.ev.on('creds.update', saveCreds);
 
-    // ⚡ PAIRING GENERATOR (Triggered directly outside of connection loops to avoid handshake failures)
-    if (!sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER) {
-        let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
-        console.log(`📱 [kukatai-agent] Fresh session. Requesting pairing code for: ${phoneNumber}`);
-        
-        setTimeout(async () => {
+    // 🔌 Connection Update & Smart Pairing Event Handler
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        // ⚡ SAFE PAIRING CODE TRIGGER inside the connection flow
+        if (qr && !sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER) {
+            let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
+            console.log(`📱 [kukatai-agent] Active Handshake detected. Requesting pairing code for: ${phoneNumber}`);
+            
             try {
                 let code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n🔑 ==========================================`);
                 console.log(`🔑 KUKATAI-AGENT PAIRING CODE: ${code}`);
                 console.log(`🔑 ==========================================\n`);
             } catch (err) {
-                console.error("❌ Failed to request pairing code:", err);
+                console.error("❌ Failed to request pairing code safely:", err.message);
             }
-        }, 10000); // Wait 10 seconds after boot to let socket handshake establish cleanly
-    }
-
-    // 🔌 Connection Update Handler
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
+        }
 
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error)?.output?.statusCode;
             const isLoggedOut = statusCode === DisconnectReason.loggedOut;
             
-            // Reconnect only if it is not a manual log out
+            // If the user purposefully logged out via phone, do not reconnect.
+            // Otherwise, reconnect to allow a fresh pairing sequence.
             const shouldReconnect = !isLoggedOut;
             
             console.log(`🔌 Connection closed (Code: ${statusCode}). Reconnecting? ${shouldReconnect}`);
             if (shouldReconnect) {
-                await delay(10000); // Increased safety delay to 10s to prevent rapid-fire crashing
+                await delay(5000); 
                 startKukaTai();
             }
         } else if (connection === 'open') {
