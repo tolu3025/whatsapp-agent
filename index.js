@@ -2,7 +2,8 @@ const {
     default: makeWASocket, 
     DisconnectReason, 
     BufferJSON, 
-    initAuthCreds 
+    initAuthCreds,
+    Browsers // Imported to guarantee valid browser signatures
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const mongoose = require('mongoose');
@@ -22,7 +23,6 @@ app.listen(PORT, () => console.log(`🌐 Express health server on Port ${PORT}`)
 // ==========================================
 // 🍃 MONGODB MODELS FOR AUTHENTICATION & VENDORS
 // ==========================================
-// Fallback to support both environment variable names
 const MongoURI = process.env.MONGODB_URI || process.env.MONGO_URI;
 
 if (!MongoURI) {
@@ -133,19 +133,19 @@ async function useMongoAuthState(sessionId) {
 async function startWhatsAppBot() {
     console.log("⚙️ Initializing dynamic MongoDB-backed session...");
     
-    // Create MongoDB Auth Handler
     const { state, saveCreds } = await useMongoAuthState("kukatai_session");
 
     const sock = makeWASocket({
         auth: state,
         printQRInTerminal: false, 
-        browser: ["Kukatai Agent", "Chrome", "1.0.0"]
+        // 🛠️ FIX: Using standard Chrome on macOS browser fingerprinting to bypass WhatsApp 428 blocks
+        browser: Browsers.macOS('Chrome') 
     });
 
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect } = update;
 
         if (connection === 'connecting') {
             console.log("⏳ Connecting to WhatsApp...");
@@ -162,7 +162,7 @@ async function startWhatsAppBot() {
                 } catch (err) {
                     console.error("Error generating pairing code:", err);
                 }
-            }, 3000);
+            }, 5000); // 5-second timeout to give connection room to stabilize
         }
 
         if (connection === 'close') {
@@ -313,7 +313,6 @@ console.log("🔌 Connecting to MongoDB Database...");
 mongoose.connect(MongoURI)
     .then(() => {
         console.log("🔋 MongoDB Connected Successfully!");
-        // Only start WhatsApp Bot once MongoDB is 100% online
         startWhatsAppBot();
     })
     .catch(err => {
