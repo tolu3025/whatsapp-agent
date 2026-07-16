@@ -1,11 +1,13 @@
 const express = require('express');
 const { 
     default: makeWASocket, 
-    useMultiFileAuthState, 
     DisconnectReason,
     delay,
-    Browsers,                     // Added for browser emulation
-    fetchLatestWaWebVersion       // Added to fetch current WA Web build
+    Browsers,
+    fetchLatestWaWebVersion,
+    initAuthCreds,
+    BufferJSON,
+    proto
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -16,7 +18,7 @@ require('dotenv').config();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ==========================================
-// 🗄️ MULTI-TENANT VENDOR SCHEMA
+// 🗄️ MULTI-TENANT VENDOR & AUTH SCHEMAS
 // ==========================================
 const VendorSchema = new mongoose.Schema({
     phoneNumber: { type: String, required: true, unique: true }, 
@@ -40,6 +42,80 @@ const VendorSchema = new mongoose.Schema({
 
 const Vendor = mongoose.models.Vendor || mongoose.model('Vendor', VendorSchema);
 
+// WhatsApp Session Authentication Schema (Fixes Render Auto-logout)
+const BaileysAuthSchema = new mongoose.Schema({
+    keyId: { type: String, required: true, unique: true },
+    value: { type: String, required: true }
+});
+
+const BaileysAuth = mongoose.models.BaileysAuth || mongoose.model('BaileysAuth', BaileysAuthSchema);
+
+// Custom Database Auth Adapter for Baileys
+async function useMongooseAuthState(sessionId) {
+    const writeData = async (data, id) => {
+        const key = `${sessionId}:${id}`;
+        const value = JSON.stringify(data, BufferJSON.replacer);
+        await BaileysAuth.updateOne({ keyId: key }, { value }, { upsert: true });
+    };
+
+    const readData = async (id) => {
+        const key = `${sessionId}:${id}`;
+        const doc = await BaileysAuth.findOne({ keyId: key });
+        if (!doc) return null;
+        return JSON.parse(doc.value, BufferJSON.reviver);
+    };
+
+    const removeData = async (id) => {
+        const key = `${sessionId}:${id}`;
+        await BaileysAuth.deleteOne({ keyId: key });
+    };
+
+    let creds = await readData('creds');
+    if (!creds) {
+        creds = initAuthCreds();
+        await writeData(creds, 'creds');
+    }
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(
+                        ids.map(async (id) => {
+                            let value = await readData(`${type}-${id}`);
+                            if (type === 'app-state-sync-key' && value) {
+                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                            }
+                            data[id] = value;
+                        })
+                    );
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            if (value) {
+                                tasks.push(writeData(value, key));
+                            } else {
+                                tasks.push(removeData(key));
+                            }
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: async () => {
+            await writeData(creds, 'creds');
+        }
+    };
+}
+
 // ==========================================
 // 🌐 EXPRESS SERVER
 // ==========================================
@@ -48,46 +124,57 @@ app.get('/', (req, res) => { res.status(200).send("KukaPay Active."); });
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => { console.log(`🌐 Express health server on Port ${PORT}`); });
 
-// Expanded bank name dictionary covering popular Nigerian commercial banks, neobanks, and microfinance networks
 const COMMON_BANKS = {
-    "access": "044", 
-    "accessbank": "044",
-    "gtb": "058", 
-    "gtbank": "058", 
-    "guarantytrust": "058",
-    "zenith": "057", 
-    "zenithbank": "057",
-    "uba": "033", 
-    "unitedbankforafrica": "033",
-    "opay": "999992", 
-    "paycom": "999992",
-    "kuda": "50211", 
-    "kudabank": "50211",
-    "moniepoint": "50515", 
-    "palmpay": "999991", 
-    "firstbank": "011", 
-    "fbn": "011", 
-    "wema": "035",
-    "wemabank": "035",
-    "fcmb": "214",
-    "firstcitymonumentbank": "214",
-    "union": "032",
-    "unionbank": "032",
-    "stanbic": "221",
-    "stanbicibtc": "221",
-    "fidelity": "070",
-    "fidelitybank": "070",
-    "sterling": "050",
-    "sterlingbank": "050",
-    "providus": "101",
-    "providusbank": "101",
-    "taj": "302",
-    "tajbank": "302",
-    "jaiz": "301",
-    "jaizbank": "301",
-    "keystone": "082",
-    "keystonebank": "082"
+    "access": "044", "gtb": "058", "gtbank": "058", "zenith": "057",
+    "uba": "033", "opay": "999992", "kuda": "50211", "moniepoint": "50515",
+    "palmpay": "999991", "firstbank": "011", "fbn": "011", "wema": "035"
 };
+
+// ==========================================
+// ⚡ FLUTTERWAVE V4 UTILITIES
+// ==========================================
+
+// Helper to retrieve dynamic, short-lived OAuth 2.0 Access Token (v4 spec)
+async function getFlutterwaveV4Token() {
+    const url = 'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token';
+    const payload = new URLSearchParams({
+        client_id: process.env.FLW_CLIENT_ID,
+        client_secret: process.env.FLW_CLIENT_SECRET,
+        grant_type: 'client_credentials'
+    });
+
+    const response = await axios.post(url, payload.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+    
+    return response.data.access_token;
+}
+
+// Account resolution with v4 dynamic token and nested account object
+async function resolveBankAccountV4(bankCode, accountNumber) {
+    const token = await getFlutterwaveV4Token();
+    const url = 'https://api.flutterwave.com/banks/account-resolve'; // Use sandbox base URL if testing
+
+    const response = await axios.post(
+        url,
+        {
+            account: {
+                code: bankCode,
+                number: accountNumber
+            },
+            currency: "NGN"
+        },
+        {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'X-Trace-Id': `trace-${Date.now()}`
+            }
+        }
+    );
+
+    return response.data;
+}
 
 // ==========================================
 // ⚡ SUPABASE REAL-TIME PAYMENT LISTENER
@@ -188,14 +275,11 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         }
         await sock.sendMessage(senderJid, { text: "Verifying account details... 🔍" });
         try {
-            const verifyRes = await axios.post(
-                'https://api.flutterwave.com/v3/accounts/resolve',
-                { account_number: accountNumber, account_bank: vendor.tempData.bankCode },
-                { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } }
-            );
+            // Using updated Flutterwave v4 integration logic
+            const verifyRes = await resolveBankAccountV4(vendor.tempData.bankCode, accountNumber);
 
-            if (verifyRes.data && verifyRes.data.status === 'success') {
-                const accountName = verifyRes.data.data.account_name;
+            if (verifyRes && verifyRes.status === 'success') {
+                const accountName = verifyRes.data.account_name;
                 vendor.tempData = { ...vendor.tempData, accountNumber, accountName };
                 vendor.onboardingStep = "CONFIRMATION";
                 await vendor.save();
@@ -213,6 +297,8 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
     if (vendor.onboardingStep === "CONFIRMATION") {
         if (lowerText === 'yes') {
             try {
+                // Fetch dynamic OAuth token for subaccount processing
+                const token = await getFlutterwaveV4Token();
                 const subRes = await axios.post(
                     'https://api.flutterwave.com/v3/subaccounts',
                     {
@@ -224,7 +310,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
                         split_value: 0.03,
                         country: "NG"
                     },
-                    { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } }
+                    { headers: { Authorization: `Bearer ${token}` } }
                 );
 
                 vendor.businessName = vendor.tempData.businessName;
@@ -266,9 +352,9 @@ async function startKukaTai() {
         process.exit(1);
     }
 
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    // Dynamic MongoDB-backed authentication credentials retrieval (Zero Re-pairing on Deploy)
+    const { state, saveCreds } = await useMongooseAuthState('kuka_pay_agent_session');
     
-    // Fetch absolute latest WA Web protocol parameters to resolve the 428 errors
     let waVersion = [2, 3000, 1015901307];
     try {
         const { version } = await fetchLatestWaWebVersion();
@@ -279,10 +365,10 @@ async function startKukaTai() {
     }
 
     const sock = makeWASocket({ 
-        version: waVersion,                                // Resolves 428 errors
+        version: waVersion,
         auth: state, 
         printQRInTerminal: !process.env.BOT_PHONE_NUMBER, 
-        browser: Browsers.macOS('Chrome'),                 // Fixes handshake disconnections
+        browser: Browsers.macOS('Chrome'),
         logger: pino({ level: 'silent' }) 
     });
     
@@ -293,8 +379,7 @@ async function startKukaTai() {
         let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
         console.log(`📱 Attempting to pair with phone number: ${phoneNumber}`);
         
-        // Waiting 10 seconds to allow the WebSocket connection to mature completely
-        await delay(10000); 
+        await delay(12000); // 12-second delay to ensure WebSocket setup is complete
         try {
             let code = await sock.requestPairingCode(phoneNumber);
             console.log(`\n🔑 ==========================================`);
