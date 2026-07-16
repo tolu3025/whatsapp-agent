@@ -3,7 +3,7 @@ const {
     default: makeWASocket, 
     DisconnectReason,
     delay,
-    Browsers,
+    Browsers,                     
     fetchLatestWaWebVersion,
     initAuthCreds,
     BufferJSON,
@@ -18,8 +18,10 @@ require('dotenv').config();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ==========================================
-// 🗄️ MULTI-TENANT VENDOR & AUTH SCHEMAS
+// 🗄️ MONGOOSE SCHEMAS (Multi-Tenant & Session)
 // ==========================================
+
+// 1. Vendor Profile Schema
 const VendorSchema = new mongoose.Schema({
     phoneNumber: { type: String, required: true, unique: true }, 
     businessName: { type: String },
@@ -42,7 +44,7 @@ const VendorSchema = new mongoose.Schema({
 
 const Vendor = mongoose.models.Vendor || mongoose.model('Vendor', VendorSchema);
 
-// WhatsApp Session Authentication Schema (Fixes Render Auto-logout)
+// 2. Persistent WhatsApp Authentication Session Schema (Fixes Render Disconnects)
 const BaileysAuthSchema = new mongoose.Schema({
     keyId: { type: String, required: true, unique: true },
     value: { type: String, required: true }
@@ -50,7 +52,7 @@ const BaileysAuthSchema = new mongoose.Schema({
 
 const BaileysAuth = mongoose.models.BaileysAuth || mongoose.model('BaileysAuth', BaileysAuthSchema);
 
-// Custom Database Auth Adapter for Baileys
+// Custom Database-backed Auth Adapter for Baileys
 async function useMongooseAuthState(sessionId) {
     const writeData = async (data, id) => {
         const key = `${sessionId}:${id}`;
@@ -120,23 +122,35 @@ async function useMongooseAuthState(sessionId) {
 // 🌐 EXPRESS SERVER
 // ==========================================
 const app = express();
+app.use(express.json());
 app.get('/', (req, res) => { res.status(200).send("KukaPay Active."); });
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => { console.log(`🌐 Express health server on Port ${PORT}`); });
 
+// Supported Banks Code Dictionary
 const COMMON_BANKS = {
-    "access": "044", "gtb": "058", "gtbank": "058", "zenith": "057",
-    "uba": "033", "opay": "999992", "kuda": "50211", "moniepoint": "50515",
-    "palmpay": "999991", "firstbank": "011", "fbn": "011", "wema": "035"
+    "access": "044", "accessbank": "044", "gtb": "058", "gtbank": "058", 
+    "guarantytrust": "058", "zenith": "057", "zenithbank": "057", "uba": "033", 
+    "unitedbankforafrica": "033", "opay": "999992", "paycom": "999992",
+    "kuda": "50211", "kudabank": "50211", "moniepoint": "50515", "palmpay": "999991", 
+    "firstbank": "011", "fbn": "011", "wema": "035", "wemabank": "035", "fcmb": "214",
+    "firstcitymonumentbank": "214", "union": "032", "unionbank": "032", "stanbic": "221",
+    "stanbicibtc": "221", "fidelity": "070", "fidelitybank": "070", "sterling": "050",
+    "sterlingbank": "050", "providus": "101", "providusbank": "101"
 };
 
 // ==========================================
-// ⚡ FLUTTERWAVE V4 UTILITIES
+// ⚡ FLUTTERWAVE V4 API INTEGRATION (FIXED)
 // ==========================================
 
-// Helper to retrieve dynamic, short-lived OAuth 2.0 Access Token (v4 spec)
+// Dynamically sets host based on Environment Settings (no more 404 errors)
+const FLW_BASE_URL = process.env.NODE_ENV === 'production' 
+    ? 'https://f4bexperience.flutterwave.com'      // Live Production Host
+    : 'https://developersandbox-api.flutterwave.com'; // Sandbox Host
+
+// Generates dynamic, short-lived OAuth 2.0 Access Token
 async function getFlutterwaveV4Token() {
-    const url = 'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token';
+    const url = 'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token'; //
     const payload = new URLSearchParams({
         client_id: process.env.FLW_CLIENT_ID,
         client_secret: process.env.FLW_CLIENT_SECRET,
@@ -147,13 +161,13 @@ async function getFlutterwaveV4Token() {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
     
-    return response.data.access_token;
+    return response.data.access_token; //
 }
 
-// Account resolution with v4 dynamic token and nested account object
+// v4 Bank Account Resolution Utility (Structured payload)
 async function resolveBankAccountV4(bankCode, accountNumber) {
     const token = await getFlutterwaveV4Token();
-    const url = 'https://api.flutterwave.com/banks/account-resolve'; // Use sandbox base URL if testing
+    const url = `${FLW_BASE_URL}/banks/account-resolve`; //
 
     const response = await axios.post(
         url,
@@ -166,14 +180,14 @@ async function resolveBankAccountV4(bankCode, accountNumber) {
         },
         {
             headers: {
-                Authorization: `Bearer ${token}`,
+                Authorization: `Bearer ${token}`, //
                 'Content-Type': 'application/json',
                 'X-Trace-Id': `trace-${Date.now()}`
             }
         }
     );
 
-    return response.data;
+    return response.data; // Expected format: { status: "success", data: { account_name, ... } }
 }
 
 // ==========================================
@@ -275,11 +289,11 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
         }
         await sock.sendMessage(senderJid, { text: "Verifying account details... 🔍" });
         try {
-            // Using updated Flutterwave v4 integration logic
+            // Safe execution of dynamic v4 Flutterwave bank account lookup
             const verifyRes = await resolveBankAccountV4(vendor.tempData.bankCode, accountNumber);
 
             if (verifyRes && verifyRes.status === 'success') {
-                const accountName = verifyRes.data.account_name;
+                const accountName = verifyRes.data.account_name; //
                 vendor.tempData = { ...vendor.tempData, accountNumber, accountName };
                 vendor.onboardingStep = "CONFIRMATION";
                 await vendor.save();
@@ -288,7 +302,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
                 });
             }
         } catch (err) {
-            console.error("Account Verification Error:", err.message);
+            console.error("❌ Account Verification Error:", err.response?.data || err.message);
             await sock.sendMessage(senderJid, { text: "❌ Verification failed. Re-enter your 10-digit account number:" });
         }
         return true;
@@ -297,7 +311,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
     if (vendor.onboardingStep === "CONFIRMATION") {
         if (lowerText === 'yes') {
             try {
-                // Fetch dynamic OAuth token for subaccount processing
+                // Fetch credentials token for subaccount creation tasks
                 const token = await getFlutterwaveV4Token();
                 const subRes = await axios.post(
                     'https://api.flutterwave.com/v3/subaccounts',
@@ -352,7 +366,7 @@ async function startKukaTai() {
         process.exit(1);
     }
 
-    // Dynamic MongoDB-backed authentication credentials retrieval (Zero Re-pairing on Deploy)
+    // Dynamic Database Authentication Loader (Bypasses local files; never logs out on Render!)
     const { state, saveCreds } = await useMongooseAuthState('kuka_pay_agent_session');
     
     let waVersion = [2, 3000, 1015901307];
@@ -374,12 +388,12 @@ async function startKukaTai() {
     
     sock.ev.on('creds.update', saveCreds);
 
-    // 🔑 SECURE PHONE PAIRING LOGIC (For easy linking on Render)
+    // 🔑 SECURE PHONE PAIRING LOGIC (For headless deploys)
     if (process.env.BOT_PHONE_NUMBER && !sock.authState.creds.registered) {
         let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
         console.log(`📱 Attempting to pair with phone number: ${phoneNumber}`);
         
-        await delay(12000); // 12-second delay to ensure WebSocket setup is complete
+        await delay(12000); // Prevents instant handshake dropped packets
         try {
             let code = await sock.requestPairingCode(phoneNumber);
             console.log(`\n🔑 ==========================================`);
