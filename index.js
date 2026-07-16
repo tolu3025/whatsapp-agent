@@ -3,7 +3,7 @@ const { OpenAI } = require('openai');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
-const express = require('express'); // ✅ FIX: Prevents Render port-binding timeout restarts
+const express = require('express'); // ✅ Prevents Render port-binding timeout restarts
 const mongoose = require('mongoose'); 
 const cron = require('node-cron'); 
 const axios = require('axios'); 
@@ -321,6 +321,12 @@ async function startAgent() {
 
             let lowerText = textMessage.toLowerCase().trim();
 
+            // 🛡️ SELF-LOOP SHIELD: If the message is from myself, and it is NOT an admin command, drop it immediately!
+            const isAdminCommand = lowerText.startsWith('.agent') || lowerText === '.market' || lowerText.startsWith('.schedule');
+            if (fromMe && !isAdminCommand) {
+                continue; 
+            }
+
             // 🔄 LOAD USER AND CREATE DYNAMIC STATE DOCUMENT
             let userDoc = await User.findOne({ remoteJid });
             if (!userDoc) {
@@ -578,7 +584,7 @@ async function startAgent() {
 
                 let apiMessages = [systemPromptInstruction];
 
-                // ✅ FIX INTEGRATED: Append historical context variables safely (Filtering out null or empty records to avoid 400 content error!)
+                // ✅ safe history filter (Prevents 400 null value parameter bugs)
                 recentHistory.forEach(h => {
                     if (h && h.text && String(h.text).trim() !== "") {
                         apiMessages.push({ 
@@ -606,7 +612,7 @@ async function startAgent() {
                 // Push message back over the air
                 await sock.sendMessage(remoteJid, { text: aiResponse });
 
-                // ✅ ATOMIC UPDATE: No Version Conflicts, pushes chat logs smoothly
+                // ✅ ATOMIC UPDATE: Pushes chat logs smoothly
                 const updatedDoc = await User.findOneAndUpdate(
                     { remoteJid },
                     { 
