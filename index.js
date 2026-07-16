@@ -412,7 +412,7 @@ async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText)
 }
 
 // ==========================================
-// 🚀 MAIN BAILEYS BOOTSTRAP
+// 🚀 MAIN BAILEYS BOOTSTRAP (CORRECT PAIRING)
 // ==========================================
 async function startKukaTai() {
     try {
@@ -423,7 +423,7 @@ async function startKukaTai() {
         process.exit(1);
     }
 
-    // Forcefully wipe old credential documents on start to allow fresh pairing code sequence
+    // Forcefully clear previous unlinked session credentials on initial boot
     try {
         await BaileysAuth.deleteMany({});
         console.log("🧹 Previous session data cleared for a fresh pairing sequence.");
@@ -446,29 +446,35 @@ async function startKukaTai() {
         version: waVersion,
         auth: state, 
         printQRInTerminal: false,
-        browser: Browsers.macOS('Chrome'), 
-        logger: pino({ level: 'silent' }) 
+        browser: Browsers.macOS('Desktop'), 
+        logger: pino({ level: 'silent' }),
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 30000
     });
     
     sock.ev.on('creds.update', saveCreds);
 
-    // 🔌 Connection Update & Smart Pairing Event Handler
+    // Prevent recursive or concurrent pairing request signals
+    let hasRequestedPairingCode = false;
+
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // ⚡ SAFE PAIRING CODE TRIGGER inside the connection flow when QR challenge is emitted
-        if (qr && !sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER) {
+        if (qr && !sock.authState.creds.registered && process.env.BOT_PHONE_NUMBER && !hasRequestedPairingCode) {
+            hasRequestedPairingCode = true;
             let phoneNumber = process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, '');
             console.log(`📱 [kukatai-agent] Challenge generated. Requesting pairing code for: ${phoneNumber}`);
             
             try {
-                await delay(2000); // Small window to verify websocket sanity
+                await delay(6000); // Give socket connection a moment to stabilize completely
                 let code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n🔑 ==========================================`);
                 console.log(`🔑 KUKATAI-AGENT PAIRING CODE: ${code}`);
                 console.log(`🔑 ==========================================\n`);
             } catch (err) {
                 console.error("❌ Failed to request pairing code safely:", err.message);
+                hasRequestedPairingCode = false; 
             }
         }
 
@@ -479,7 +485,9 @@ async function startKukaTai() {
             
             console.log(`🔌 Connection closed (Code: ${statusCode}). Reconnecting? ${shouldReconnect}`);
             if (shouldReconnect) {
-                await delay(8000); 
+                // If it fails or drops during linking, rest longer to bypass rate limits
+                const reconnectDelay = hasRequestedPairingCode ? 15000 : 8000;
+                await delay(reconnectDelay); 
                 startKukaTai();
             }
         } else if (connection === 'open') {
