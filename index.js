@@ -1,560 +1,374 @@
-const { default: makeWASocket, initAuthCreds, BufferJSON, proto, delay, downloadMediaMessage } = require('@whiskeysockets/baileys');
-const { OpenAI } = require('openai');
+const express = require('express');
+const { 
+    default: makeWASocket, 
+    useMultiFileAuthState, 
+    DisconnectReason,
+    downloadMediaMessage
+} = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const fs = require('fs');
-const path = require('path');
-const express = require('express'); 
-const mongoose = require('mongoose'); 
-const cron = require('node-cron'); 
-const axios = require('axios'); 
-const os = require('os');
+const mongoose = require('mongoose');
+const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
 
-// 🔇 SILENCE DEPRECATION WARNINGS GLOBALLY
-mongoose.set('strictQuery', true);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-const openai = new OpenAI({ 
-    apiKey: process.env.OPENAI_API_KEY,
-    timeout: 60000,   
-    maxRetries: 3     
-});
+// ==========================================
+// 🗄️ UPGRADED BUSINESS & PA SCHEMA
+// ==========================================
+const VendorSchema = new mongoose.Schema({
+    phoneNumber: { type: String, required: true, unique: true }, // WhatsApp JID
+    businessName: { type: String },
+    bankCode: { type: String },
+    accountNumber: { type: String },
+    accountName: { type: String },
+    subaccountId: { type: String },
+    dashboardBalance: { type: Number, default: 0 },
+    onboardingStep: { type: String, default: "IDLE" },
+    tempData: { type: Object, default: {} },
+    
+    // PA & Group Customizations
+    targetGroupId: { type: String }, // The WhatsApp Group JID the AI is managing
+    groupRules: { type: String, default: "Be polite, showcase our products, and tell them to DM us to order." },
+    customKeywords: { type: [String], default: ["price", "cost", "buy", "order", "available"] },
+    lastGroupBlast: { type: Date, default: Date.now },
+    blastIntervalHours: { type: Number, default: 6 }, // How often to post promotional material (e.g. 6 hours)
+    savedPromoImages: { type: [String], default: [] } // Array of WhatsApp Media IDs/Urls saved by the vendor
+}, { timestamps: true });
 
-// 📦 CONNECT TO MONGO CLOUD DATABASE
-const mongoURI = process.env.MONGODB_URI;
-if (!mongoURI) {
-    console.error("❌ CRITICAL ERROR: MONGODB_URI environment variable is missing!");
-} else {
-    mongoose.connect(mongoURI)
-        .then(() => console.log("📦 PERMANENT DATABASE: Connected to MongoDB Atlas Cloud!"))
-        .catch(err => console.error("❌ MongoDB Connection Error:", err.message));
-}
+const Vendor = mongoose.models.Vendor || mongoose.model('Vendor', VendorSchema);
 
-// 🗄️ DATABASE SCHEMAS
-const UserSchema = new mongoose.Schema({
-    remoteJid: { type: String, required: true, unique: true },
-    knownFacts: { type: [String], default: [] },
-    chatHistory: { type: Array, default: [] } 
-});
-const User = mongoose.model('User', UserSchema);
+// ==========================================
+// 🌐 EXPRESS SERVER
+// ==========================================
+const app = express();
+app.get('/', (req, res) => { res.status(200).send("KukaPay PA & Group Engagement Engine Active."); });
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => { console.log(`🌐 Express health server on Port ${PORT}`); });
 
-const AuthSchema = new mongoose.Schema({
-    _id: { type: String, required: true },
-    data: { type: String, required: true }
-});
-const Auth = mongoose.model('Auth', AuthSchema);
+const COMMON_BANKS = {
+    "access": "044", "gtb": "058", "gtbank": "058", "zenith": "057",
+    "uba": "033", "opay": "999992", "kuda": "50211", "moniepoint": "50515",
+    "palmpay": "999991", "firstbank": "011", "fbn": "011", "wema": "035"
+};
 
-const ScheduleSchema = new mongoose.Schema({
-    task: { type: String, required: true },
-    date: { type: String, required: true }, 
-    time: { type: String, required: true }, 
-    alertSent: { type: Boolean, default: false }
-});
-const Schedule = mongoose.model('Schedule', ScheduleSchema);
+// ==========================================
+// ⚡ SUPABASE REAL-TIME PAYMENT LISTENER
+// ==========================================
+function startSupabaseListener(sock) {
+    supabase
+        .channel('public:transactions') 
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, async (payload) => {
+            const record = payload.new;
+            if (record.status === 'successful' || record.status === 'success') {
+                const txRef = record.tx_ref; 
+                const amount = record.amount;
 
-// 🔐 CUSTOM MONGODB AUTH ADAPTER
-async function useMongoDBAuthState() {
-    const writeData = async (data, id) => {
-        const stringified = JSON.stringify(data, BufferJSON.replacer);
-        await Auth.updateOne({ _id: id }, { $set: { data: stringified } }, { upsert: true });
-    };
-    const readData = async (id) => {
-        const doc = await Auth.findOne({ _id: id });
-        if (doc && doc.data) return JSON.parse(doc.data, BufferJSON.reviver);
-        return null;
-    };
-    const removeData = async (id) => { await Auth.deleteOne({ _id: id }); };
-    const creds = await readData('creds') || initAuthCreds();
-    return {
-        state: {
-            creds,
-            keys: {
-                get: async (type, ids) => {
-                    const data = {};
-                    await Promise.all(ids.map(async id => {
-                        let value = await readData(`${type}-${id}`);
-                        if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSyncKeyData.fromObject(value);
-                        data[id] = value;
-                    }));
-                    return data;
-                },
-                set: async (data) => {
-                    const tasks = [];
-                    for (const category in data) {
-                        for (const id in data[category]) {
-                            const value = data[category][id];
-                            const key = `${category}-${id}`;
-                            tasks.push(value ? writeData(value, key) : removeData(key));
-                        }
+                try {
+                    const refParts = txRef.split('_');
+                    const vendorPhone = refParts[2] + "@s.whatsapp.net";
+
+                    const vendor = await Vendor.findOne({ phoneNumber: vendorPhone });
+                    if (vendor) {
+                        vendor.dashboardBalance += amount;
+                        await vendor.save();
+
+                        // Notify Vendor of credit
+                        await sock.sendMessage(vendorPhone, {
+                            text: `🔔 *KukaPay Instant Credit!* 🔔\n\nYour account has been credited with *₦${amount}*!\n📈 Updated Balance: *₦${vendor.dashboardBalance}*`
+                        });
                     }
-                    await Promise.all(tasks);
+                } catch (err) {
+                    console.error("❌ Realtime Credit Error:", err.message);
                 }
             }
-        },
-        saveCreds: () => writeData(creds, 'creds')
-    };
+        }).subscribe();
 }
 
-let agentModeActive = true; 
-const myDmJid = "2348148698365@s.whatsapp.net";
-
-// 💱 LIVE FCSAPI FOREX ENGINE
-async function fetchFcsapiForexMatrix() {
-    try {
-        const fxKey = process.env.FOREX_API_KEY;
-        if (!fxKey) return "Error: FOREX_API_KEY environment variable is unconfigured.";
-        
-        const response = await axios.get(`https://fcsapi.com/api-v3/forex/latest?id=1,2,3&access_key=${fxKey}`);
-        
-        if (response.data && response.data.status && response.data.response) {
-            return response.data.response.map(q => 
-                `📌 Pair: ${q.s}\n• Price: ${q.c}\n• 24h High: ${q.h} | 24h Low: ${q.l}\n• Last Change: ${q.ch || '0.00'}`
-            ).join('\n\n');
-        }
-        return "FCSAPI reporting flat execution channels currently.";
-    } catch (err) {
-        console.error("FCSAPI Matrix Fetch Failed:", err.message);
-        return "Fallback Framework: Live liquidity fields matching standard WAT baseline structures.";
+// ==========================================
+// 📲 VENDOR ONBOARDING & SETUP CONVERSATIONAL FLOW
+// ==========================================
+async function handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText) {
+    const senderJid = msg.key.remoteJid;
+    let vendor = await Vendor.findOne({ phoneNumber: senderJid });
+    if (!vendor) {
+        vendor = new Vendor({ phoneNumber: senderJid });
+        await vendor.save();
     }
-}
 
-// ⏰ AUTOMATED CRON SCHEDULER CONTROLLER
-function startProactiveAutomationClocks(sock) {
+    // Command: Register/Setup Vendor Subaccount
+    if (lowerText === 'register' || lowerText === 'setup' || lowerText === 'onboard') {
+        vendor.onboardingStep = "WAITING_BIZ_NAME";
+        vendor.tempData = {};
+        await vendor.save();
+        await sock.sendMessage(senderJid, { text: "Let's set up your business! Reply with your **Business Name**:" });
+        return true;
+    }
 
-    // 🌅 1. Daily Morning Financial Briefing Loop (7:00 AM WAT)
-    cron.schedule('0 7 * * *', async () => {
-        const todayStr = new Date().toISOString().split('T')[0];
-        let agendaList = "No events scheduled for today, boss. Free space!";
+    // Command: Set Group Rules & Target Group
+    if (lowerText.startsWith('/setrules ')) {
+        const rules = textMessage.substring(10);
+        vendor.groupRules = rules;
+        await vendor.save();
+        await sock.sendMessage(senderJid, { text: `✅ *PA Custom Rules Updated!* Your AI will now engage groups using this style:\n\n"${rules}"` });
+        return true;
+    }
+
+    // Command: Bind Group to the AI
+    if (lowerText === '/linkgroup') {
+        vendor.onboardingStep = "WAITING_GROUP_LINK";
+        await vendor.save();
+        await sock.sendMessage(senderJid, { text: "Drop the WhatsApp Group JID or add me to the group and type `/here` inside that group so I can capture its ID!" });
+        return true;
+    }
+
+    // Onboarding Step Machine
+    if (vendor.onboardingStep === "WAITING_BIZ_NAME") {
+        vendor.tempData = { businessName: textMessage };
+        vendor.onboardingStep = "WAITING_BANK";
+        await vendor.save();
+        await sock.sendMessage(senderJid, { text: "Nice! Now reply with your **Bank Name** (e.g. GTBank, Opay, Kuda):" });
+        return true;
+    }
+
+    if (vendor.onboardingStep === "WAITING_BANK") {
+        const cleanBank = lowerText.replace(/\s+/g, '');
+        const bankCode = COMMON_BANKS[cleanBank];
+        if (!bankCode) {
+            await sock.sendMessage(senderJid, { text: "❌ Bank not recognized. Try again (e.g. Opay, GTBank):" });
+            return true;
+        }
+        vendor.tempData = { ...vendor.tempData, bankCode, bankName: textMessage };
+        vendor.onboardingStep = "WAITING_ACCT";
+        await vendor.save();
+        await sock.sendMessage(senderJid, { text: `Perfect! What is your **10-digit Account Number** for ${vendor.tempData.bankName}:` });
+        return true;
+    }
+
+    if (vendor.onboardingStep === "WAITING_ACCT") {
+        const accountNumber = textMessage.trim();
+        if (!/^\d{10}$/.test(accountNumber)) {
+            await sock.sendMessage(senderJid, { text: "❌ Must be exactly 10 digits. Try again:" });
+            return true;
+        }
+        await sock.sendMessage(senderJid, { text: "Verifying account details... 🔍" });
         try {
-            const items = await Schedule.find({ date: todayStr });
-            if (items.length > 0) agendaList = items.map((item, i) => `- [${item.time}]: ${item.task}`).join('\n');
-        } catch (e) {}
+            const verifyRes = await axios.post(
+                'https://api.flutterwave.com/v3/accounts/resolve',
+                { account_number: accountNumber, account_bank: vendor.tempData.bankCode },
+                { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } }
+            );
 
-        const liveForexMatrixContext = await fetchFcsapiForexMatrix();
-
-        try {
-            const completion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                messages: [
-                    { 
-                        role: "system", 
-                        content: `You are Kuka-tai, executive assistant to Toluwanimi. 
-                        Build an elite, motivational daily morning briefing using bold Pidgin mixed with developer confidence.
-                        
-                        🚨 FORMATTING MANDATE:
-                        DO NOT USE ANY ASTERISKS OR STARS (e.g., do NOT use **, ***, or *). 
-                        Format your response completely in clean, plain text using line breaks, capital letters, emojis, and dashes to divide your sections nicely.
-                        
-                        Synthesize the provided live market data feed into crisp, general market trends, followed immediately by listing his scheduled agenda items for the day layout.` 
-                    },
-                    { role: "user", content: `Date context: 2026-07-16\n\nCalendar Items:\n${agendaList}\n\nLive Raw Market Feed:\n${liveForexMatrixContext}` }
-                ]
-            });
-            await sock.sendMessage(myDmJid, { text: `🌅 KUKA-TAI DAILY MORNING BRIEFING\n\n${completion.choices[0].message.content}` });
-        } catch (err) { console.error("Morning brief error:", err.message); }
-    }, { timezone: "Africa/Lagos" });
-
-    // 📊 2. Automated 4-Hour Proactive Market Intelligence Loop (Fires every 4 hours)
-    cron.schedule('0 */4 * * *', async () => {
-        console.log("⏰ Running 4-hour automated live forex structural pulse ticker...");
-        const fxDataMatrix = await fetchFcsapiForexMatrix();
-
-        try {
-            const completion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                messages: [
-                    { 
-                        role: "system", 
-                        content: `You are Kuka-tai, Toluwanimi's Lead Quantitative Risk Engine. 
-                        Every 4 hours, you intercept real-time price metrics to map institutional volatility.
-                        
-                        🚨 RISK STRATEGY OVERRIDE:
-                        - If the currency change (ch) is positive and price is closer to the High, construct a BUY/LONG breakout trade.
-                        - If the currency change (ch) is negative or price is closer to the Low, construct a SELL/SHORT breakdown trade. DO NOT force buy recommendations on bearish market structures.
-                        
-                        You must output clear setup indicators using professional developer confidence mixed with smooth trading Pidgin:
-                        1. Directional Bias Strategy (Buy Stop / Sell Stop / Market Execution)
-                        2. Calculated Entry Zone
-                        3. Strict Take Profit Levels (TP1 and TP2 targets)
-                        4. Risk Mitigation Stop Loss (SL level positioned directly outside standard session volatility boundaries)
-                        
-                        ⚠️ CRITICAL FORMATTING RULE: 
-                        YOU ARE STRICTLY FORBIDDEN FROM USING ASTERISKS (*) OR MARKOVER SHARP SIGNS (#). 
-                        Do NOT use double asterisks (** text **) for bolding. For section headers, use UPPERCASE text. 
-                        Format using clear line breaks, simple dashes (-), and emojis. Avoid all news.` 
-                    },
-                    { role: "user", content: `Live FCSAPI Forex Feed:\n\n${fxDataMatrix}` }
-                ]
-            });
-            await sock.sendMessage(myDmJid, { text: `📊 KUKA-TAI 4-HOUR AUTOMATED MARKET BRIEF\n\n${completion.choices[0].message.content}` });
-        } catch (err) { console.error("4-hour automated FX pulse failed:", err.message); }
-    }, { timezone: "Africa/Lagos" });
-
-    // ⏱️ 3. Calendar Ticker (Runs every 15 minutes to send 30-minute countdown alerts)
-    cron.schedule('*/15 * * * *', async () => {
-        const now = new Date();
-        const lagosTime = new Date(now.toLocaleString("en-US", {timeZone: "Africa/Lagos"}));
-        const dateStr = lagosTime.toISOString().split('T')[0];
-        
-        lagosTime.setMinutes(lagosTime.getMinutes() + 30);
-        const targetHours = String(lagosTime.getHours()).padStart(2, '0');
-        const targetMinutes = String(lagosTime.getMinutes()).padStart(2, '0');
-        const targetTimeStr = `${targetHours}:${targetMinutes}`;
-
-        try {
-            const dynamicMatch = await Schedule.findOne({ date: dateStr, time: targetTimeStr, alertSent: false });
-            if (dynamicMatch) {
-                await sock.sendMessage(myDmJid, { 
-                    text: `🔔 KUKA-TAI SCHEDULE ALERT\n\nBoss, quick heads up! In exactly 30 minutes (${dynamicMatch.time}), you have:\n👉 ${dynamicMatch.task}\n\nMake I prepare any logs or keep system running?` 
+            if (verifyRes.data && verifyRes.data.status === 'success') {
+                const accountName = verifyRes.data.data.account_name;
+                vendor.tempData = { ...vendor.tempData, accountNumber, accountName };
+                vendor.onboardingStep = "CONFIRMATION";
+                await vendor.save();
+                await sock.sendMessage(senderJid, { 
+                    text: `Is this correct?\n\n👤 **Name:** ${accountName}\n🏦 **Bank:** ${vendor.tempData.bankName}\n🔢 **Acct:** ${accountNumber}\n\nReply *YES* to activate or *NO* to reset.` 
                 });
-                dynamicMatch.alertSent = true;
-                await dynamicMatch.save();
             }
-        } catch (err) { console.error("Ticker engine malfunction:", err.message); }
-    });
+        } catch (err) {
+            await sock.sendMessage(senderJid, { text: "❌ Verification failed. Re-enter your 10-digit account number:" });
+        }
+        return true;
+    }
+
+    if (vendor.onboardingStep === "CONFIRMATION") {
+        if (lowerText === 'yes') {
+            try {
+                const subRes = await axios.post(
+                    'https://api.flutterwave.com/v3/subaccounts',
+                    {
+                        account_bank: vendor.tempData.bankCode,
+                        account_number: vendor.tempData.accountNumber,
+                        business_name: vendor.tempData.businessName,
+                        business_email: `${vendor.tempData.businessName.replace(/\s+/g, '').toLowerCase()}@kukapay.com`,
+                        split_type: "percentage",
+                        split_value: 0.03,
+                        country: "NG"
+                    },
+                    { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } }
+                );
+
+                vendor.businessName = vendor.tempData.businessName;
+                vendor.bankCode = vendor.tempData.bankCode;
+                vendor.accountNumber = vendor.tempData.accountNumber;
+                vendor.accountName = vendor.tempData.accountName;
+                vendor.subaccountId = subRes.data.data.subaccount_id;
+                vendor.onboardingStep = "COMPLETED";
+                vendor.tempData = {};
+                await vendor.save();
+
+                await sock.sendMessage(senderJid, { text: `🎉 *Setup Successful!* Your AI Merchant profile is live for *${vendor.businessName}*!` });
+            } catch (err) {
+                await sock.sendMessage(senderJid, { text: "❌ Gateway error. Reply YES to try again." });
+            }
+        } else {
+            vendor.onboardingStep = "IDLE";
+            await vendor.save();
+            await sock.sendMessage(senderJid, { text: "Reset successful. Type *register* to start again." });
+        }
+        return true;
+    }
+
+    return false;
 }
 
-async function startAgent() {
-    const { state, saveCreds } = await useMongoDBAuthState();
-    const sock = makeWASocket({
-        auth: state,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: ["Ubuntu", "Chrome", "20.0.04"] 
-    });
+// ==========================================
+// 🚀 MAIN BAILEYS BOOTSTRAP & ENGAGEMENT ROUTER
+// ==========================================
+async function startKukaTai() {
+    try {
+        await mongoose.connect(process.env.MONGODB_URI);
+        console.log("🔋 MongoDB Connected Successfully!");
+    } catch (err) {
+        console.error("❌ Database Connection Error:", err.message);
+        process.exit(1);
+    }
 
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const sock = makeWASocket({ auth: state, printQRInTerminal: true, logger: pino({ level: 'silent' }) });
     sock.ev.on('creds.update', saveCreds);
 
-    if (!sock.authState.creds.registered) {
-        await delay(3000); 
-        const phoneNumber = "2348148698365"; 
-        try {
-            const code = await sock.requestPairingCode(phoneNumber);
-            console.log(`\n🔑 WHATSAPP PAIRING CODE: ${code}\n`);
-        } catch (err) {}
-    }
-
     sock.ev.on('connection.update', (update) => {
-        const { connection } = update;
-        if (connection === 'open') {
-            console.log("🚀 TOLUWANIMI'S KUKATAI AGENT IS LIVE (ALL SYSTEMS CORRECTED)!");
-            startProactiveAutomationClocks(sock); 
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startKukaTai();
+        } else if (connection === 'open') {
+            console.log('🚀 KukaPay PA Engine active!');
+            startSupabaseListener(sock);
         }
-        if (connection === 'close') startAgent();
     });
 
     sock.ev.on('messages.upsert', async (m) => {
-        if (m.type !== 'notify' && m.type !== 'append') return;
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
 
-        for (const msg of m.messages) {
-            if (!msg.message) continue;
+        const senderJid = msg.key.remoteJid;
+        const isGroup = senderJid.endsWith('@g.us');
+        const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+        const lowerText = textMessage.trim().toLowerCase();
 
-            const remoteJid = msg.key.remoteJid;
-            const isGroup = remoteJid.endsWith('@g.us');
-            const isStatus = remoteJid === 'status@broadcast';
-            const isNewsletter = remoteJid.endsWith('@newsletter');
-            const fromMe = msg.key.fromMe;
-            
-            const isImageMessage = !!msg.message.imageMessage;
-            const isAudioMessage = !!msg.message.audioMessage || !!msg.message.pttMessage;
-            
-            let textMessage = msg.message.conversation || 
-                                msg.message.extendedTextMessage?.text || 
-                                msg.message.imageMessage?.caption ||
-                                "";
+        // 1️⃣ HANDLE PRIVATE VENDOR CHAT SETUP & PROMO MEDIA SAVING
+        if (!isGroup) {
+            const isOboardingCmd = ['register', 'setup', 'onboard', '/setrules', '/linkgroup'].includes(lowerText) || lowerText.startsWith('/setrules ');
+            const activeVendor = await Vendor.findOne({ phoneNumber: senderJid });
 
-            const lowerText = textMessage.toLowerCase().trim();
-
-            // 🛡️ IRONCLAD LOOP SHIELD: Reject any normal outbound messages sent by the bot itself
-            const isCommand = lowerText.startsWith('.agent') || lowerText === '.market' || lowerText.startsWith('.schedule');
-            if (fromMe && !isCommand) {
-                continue; 
+            // Allow vendor to send promotional pictures to be saved
+            if (activeVendor && (msg.message.imageMessage)) {
+                try {
+                    await sock.sendMessage(senderJid, { text: "Saving this image for your scheduled group promotions... 📥" });
+                    
+                    // In production, we save the message key so we can forward/resend the image later without consuming DB storage!
+                    activeVendor.savedPromoImages.push(JSON.stringify(msg.key));
+                    await activeVendor.save();
+                    
+                    await sock.sendMessage(senderJid, { text: "✅ Image saved! I will cycle through this and other saved images during scheduled group blasts." });
+                    return;
+                } catch (err) {
+                    console.error("Media Save Error:", err);
+                }
             }
 
-            // 🛠️ DEFENSIVE INTERNAL COMMAND HANDLING
-            if (fromMe && !isGroup) {
-                if (lowerText === '.agent on') {
-                    agentModeActive = true;
-                    await sock.sendMessage(remoteJid, { text: "💼 Agent Mode ON." });
-                    continue;
-                }
-                if (lowerText === '.agent off') {
-                    agentModeActive = false;
-                    await sock.sendMessage(remoteJid, { text: "👋 Agent Mode OFF." });
-                    continue;
-                }
+            if (isOboardingCmd || (activeVendor && activeVendor.onboardingStep !== "IDLE" && activeVendor.onboardingStep !== "COMPLETED")) {
+                const intercepted = await handleVendorSetupAndOnboarding(sock, msg, textMessage, lowerText);
+                if (intercepted) return;
+            } else {
+                // ==========================================
+                // 🧠 CLIENT DM: TAKE ORDERS & CLOSE DEALS
+                // ==========================================
+                try {
+                    // Try to identify which vendor owns this DM number
+                    const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
+                    const vendor = await Vendor.findOne({ phoneNumber: myJid });
+                    const businessContext = vendor 
+                        ? `You are the executive PA for "${vendor.businessName}". Rules: ${vendor.groupRules}. Close sales, provide payment details if they are ready, and be ultra-professional.`
+                        : "You are a professional assistant for our vendor business. Be helpful, fun, and close deals.";
 
-                // 📊 MANUAL MARKET TICKER FOREX SCANNER COMMAND (FCSAPI)
-                if (lowerText === '.market') {
+                    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+                        model: "gpt-4o-mini",
+                        messages: [
+                            { role: "system", content: businessContext },
+                            { role: "user", content: textMessage }
+                        ],
+                        max_tokens: 200
+                    }, { headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` } });
+
+                    await sock.sendMessage(senderJid, { text: response.data.choices[0].message.content });
+                } catch (err) {
+                    console.error("DM AI Error:", err.message);
+                }
+            }
+        }
+
+        // 2️⃣ HANDLE GROUP INTERACTION & TRIGGER-BASED ENGAGEMENT
+        if (isGroup) {
+            // Find the Vendor who owns/configured this specific group JID
+            const vendor = await Vendor.findOne({ targetGroupId: senderJid });
+            
+            // Allow capturing group JID on command in the target group
+            if (lowerText === '/here') {
+                const senderNum = msg.key.participant.split('@')[0] + "@s.whatsapp.net";
+                const checkVendor = await Vendor.findOne({ phoneNumber: senderNum });
+                if (checkVendor) {
+                    checkVendor.targetGroupId = senderJid;
+                    checkVendor.onboardingStep = "COMPLETED";
+                    await checkVendor.save();
+                    await sock.sendMessage(senderJid, { text: `🎉 *AI Agent Activated for this Group!* I will now assist your customers using your customized rules.` });
+                    return;
+                }
+            }
+
+            if (vendor) {
+                const botJid = sock.user.id.split(':')[0];
+                const isMentioned = textMessage.includes(`@${botJid}`);
+                const matchesKeyword = vendor.customKeywords.some(keyword => lowerText.includes(keyword));
+
+                // 🎯 Only reply if explicitly mentioned or matches custom business keywords to save tokens & prevent spam
+                if (isMentioned || matchesKeyword) {
                     try {
-                        await sock.sendMessage(remoteJid, { text: "⏳ Intercepting liquid exchange matrix and computing session support/resistance channels..." });
-                        const fxMatrix = await fetchFcsapiForexMatrix();
-
-                        const completion = await openai.chat.completions.create({
+                        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
                             model: "gpt-4o-mini",
                             messages: [
                                 { 
                                     role: "system", 
-                                    content: `You are Kuka-tai, Toluwanimi's Quantum FX Terminal. Take live metrics from FCSAPI and calculate structural ranges. 
-                                    
-                                    🚨 TWO-SIDED MARKET ANALYSIS MANDATE:
-                                    - If change (ch) is positive, write a LONG/BUY setup above high.
-                                    - If change (ch) is negative or price is closer to the low, write a SHORT/SELL setup below low. Never force buys on structural downtrends.
-                                    
-                                    ⚠️ CRITICAL FORMATTING RULE:
-                                    DO NOT USE ANY ASTERISKS (*) OR HASHTAGS (#). 
-                                    Write sections in clean UPPERCASE text blocks instead. Use spaces and line breaks for layout formatting.` 
+                                    content: `You are the resident AI assistant in the business group of "${vendor.businessName}". Tone: Fun, helpful, yet business-focused. Strict Instructions: ${vendor.groupRules}` 
                                 },
-                                { role: "user", content: `Live FCSAPI Feed Data:\n\n${fxMatrix}` }
-                            ]
-                        });
-                        await sock.sendMessage(remoteJid, { text: `💱 ON-DEMAND FOREX SCALPING MATRIX\n\n${completion.choices[0].message.content}` });
-                    } catch (err) { console.error("Manual market loop failed:", err.message); }
-                    continue;
-                }
-                
-                // 🧠 OpenAI-Powered Schedule Action Parser (CREATE, UPDATE, DELETE, LIST)
-                if (lowerText.startsWith('.schedule')) {
-                    try {
-                        const commandBody = textMessage.replace(/^\.schedule/i, '').trim();
-
-                        const completion = await openai.chat.completions.create({
-                            model: "gpt-4o-mini",
-                            response_format: { type: "json_object" },
-                            messages: [
-                                {
-                                    role: "system",
-                                    content: `You are a scheduling command analyzer. Classify the user's instructions into one of these actions:
-                                    1. "list" -> If the user wants to see, display, or list upcoming tasks (e.g. ".schedule list").
-                                    2. "delete" -> If they want to remove, cancel, or clear a task (e.g. ".schedule delete Friday task").
-                                    3. "update" -> If they want to change, modify, edit, or adjust an existing task's details, date, or time (e.g. ".schedule change Friday task time to 9:00").
-                                    4. "create" -> ONLY if they are describing a completely new task to log from scratch (e.g. ".schedule 2026-07-17 @ 09:00 - IFT 212 exam").
-                                    
-                                    Return a strictly structured JSON object with these keys:
-                                    - "action": "create" | "update" | "delete" | "list"
-                                    - "date": "YYYY-MM-DD" (Calculated correctly from context; only for create/update)
-                                    - "time": "HH:MM" (24-hour format; only for create/update)
-                                    - "task": "clean description" (The task details; only for create/update)
-                                    - "searchQuery": "fragment" (For delete/update. Extract the target task keyword, e.g. "IFT 212" or "Friday")
-                                    - "updateField": "date" | "time" | "task" | "all" (Only for update)
-                                    
-                                    Current Date context: Thursday, July 16, 2026.`
-                                },
-                                { role: "user", content: commandBody }
-                            ]
-                        });
-
-                        const data = JSON.parse(completion.choices[0].message.content);
-                        console.log("Resolved AI Schedule Action Plan:", data);
-
-                        if (data.action === "list") {
-                            const upcoming = await Schedule.find({}).sort({ date: 1, time: 1 }).limit(10);
-                            if (upcoming.length > 0) {
-                                const listStr = upcoming.map((ev, i) => `${i+1}. [${ev.date} @ ${ev.time} WAT] - ${ev.task}`).join('\n');
-                                await sock.sendMessage(remoteJid, { text: `📅 CURRENT SCHEDULED TASKS\n\n${listStr}` });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: "📅 CURRENT SCHEDULED TASKS\n\nNo scheduled tasks found in database cloud." });
-                            }
-                        } 
-                        else if (data.action === "delete") {
-                            const result = await Schedule.deleteOne({ task: { $regex: data.searchQuery, $options: 'i' } });
-                            if (result.deletedCount > 0) {
-                                await sock.sendMessage(remoteJid, { text: `🗑️ TASK DELETED SUCCESSFULLY\n\nRemoved schedule matching query: "${data.searchQuery}"` });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: `❌ TASK NOT FOUND\n\nCould not find any upcoming schedule matching: "${data.searchQuery}"` });
-                            }
-                        } 
-                        else if (data.action === "update") {
-                            const queryCondition = data.searchQuery 
-                                ? { task: { $regex: data.searchQuery, $options: 'i' } } 
-                                : { date: data.date };
-
-                            const event = await Schedule.findOne(queryCondition);
-                            if (event) {
-                                if (data.date && data.updateField !== "time" && data.updateField !== "task") event.date = data.date;
-                                if (data.time) event.time = data.time;
-                                if (data.task && data.updateField === "task") event.task = data.task;
-                                await event.save();
-                                await sock.sendMessage(remoteJid, { text: `📝 TASK UPDATED SUCCESSFULLY\n\n📅 Date: ${event.date}\n🕒 Time: ${event.time}\n📌 Task: ${event.task}` });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: `❌ TARGET TASK NOT FOUND\n\nCould not locate an active schedule matching: "${data.searchQuery || data.date}"` });
-                            }
-                        } 
-                        else if (data.action === "create") {
-                            const newEvent = new Schedule({ task: data.task, date: data.date, time: data.time });
-                            await newEvent.save();
-                            await sock.sendMessage(remoteJid, { text: `✅ EVENT SCHEDULED VIA AI\n\n📅 Date: ${data.date}\n🕒 Time: ${data.time}\n📌 Task: ${data.task}` });
-                        }
-                    } catch (err) { 
-                        console.error("AI Scheduler parser failure:", err.message); 
-                        await sock.sendMessage(remoteJid, { text: "❌ SYSTEM ERROR: Failed to execute schedule instruction." });
-                    }
-                    continue; 
-                }
-            }
-
-            if (isStatus || isNewsletter) continue;
-            
-            // 🎤 PROCESS VOICE NOTES
-            if (isAudioMessage && !fromMe) {
-                try {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                    const tempOgg = path.join(os.tmpdir(), `temp_${Date.now()}.ogg`);
-                    fs.writeFileSync(tempOgg, buffer);
-                    
-                    const transcription = await openai.audio.transcriptions.create({
-                        file: fs.createReadStream(tempOgg),
-                        model: "whisper-1",
-                        prompt: "Bolanle, bawo ni? Drop account detail boss. E se gan. Oya speak English, Pidgin, and Yoruba comfortably. Correct spellings like Opay, KukaPay, Kuka-tai, jare, na, abeg.",
-                    });
-                    
-                    textMessage = transcription.text;
-                    try { fs.unlinkSync(tempOgg); } catch (e) {}
-                } catch (err) { textMessage = "[User sent a Voice Note, but I couldn't hear it clearly.]"; }
-            }
-
-            if (!textMessage && !isImageMessage && !isAudioMessage) continue;
-
-            // 📡 1. THE GROUP CHAT RADAR
-            if (isGroup && agentModeActive && !fromMe) {
-                const lowerMsg = textMessage.toLowerCase();
-                const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-                const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const isTagged = mentionedJids.includes(botNumber);
-                
-                const isTriggered = isTagged || lowerMsg.includes('toluwanimi') || lowerMsg.includes('admin') || lowerMsg.includes('softdev') || lowerMsg.includes('agent');
-
-                if (isTriggered) {
-                    try {
-                        const completion = await openai.chat.completions.create({
-                            model: "gpt-4o-mini",
-                            messages: [
-                                { role: "system", content: `You are Toluwanimi's Assistant. Keep group replies brief. Direct Softdev business to DM. Do not use asterisks (*).` },
-                                { role: "user", content: textMessage }
+                                { role: "user", content: `From ${msg.pushName || "Customer"}: ${textMessage}` }
                             ],
+                            max_tokens: 150
+                        }, { headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` } });
+
+                        await sock.sendMessage(senderJid, { text: response.data.choices[0].message.content }, { quoted: msg });
+                    } catch (err) {
+                        console.error("Group AI Error:", err.message);
+                    }
+                }
+
+                // ⏳ ACTIVITY-DRIVEN PROMOTIONAL BLASTS (No Heavy Cron Jobs)
+                const now = new Date();
+                const hoursSinceLastBlast = (now - new Date(vendor.lastGroupBlast)) / (1000 * 60 * 60);
+
+                if (hoursSinceLastBlast >= vendor.blastIntervalHours) {
+                    vendor.lastGroupBlast = now;
+                    await vendor.save();
+
+                    // If vendor saved promotional photos, pick one and broadcast it!
+                    if (vendor.savedPromoImages.length > 0) {
+                        const randomImageKey = JSON.parse(vendor.savedPromoImages[Math.floor(Math.random() * vendor.savedPromoImages.length)]);
+                        
+                        // We use Baileys forward message to efficiently resend the saved promo image to the group
+                        await sock.forwardMessage(senderJid, randomImageKey);
+                        await sock.sendMessage(senderJid, { 
+                            text: `✨ *Quick Update from KukaPay PA:* Check out this top pick! DMs are open to secure yours now! 🛍️` 
                         });
-                        await sock.sendMessage(remoteJid, { text: completion.choices[0].message.content }, { quoted: msg });
-                    } catch (err) {}
-                }
-                continue; 
-            }
-
-            // 📩 2. PERSONAL DM ASSISTANT & SILENT OBSERVER
-            if (!isGroup) {
-                if (textMessage.startsWith('.')) continue;
-
-                let userProfile;
-                try {
-                    userProfile = await User.findOneAndUpdate(
-                        { remoteJid },
-                        { $setOnInsert: { knownFacts: [], chatHistory: [] } },
-                        { upsert: true, returnDocument: 'after' }
-                    );
-                } catch (dbErr) { 
-                    userProfile = new User({ remoteJid, knownFacts: [], chatHistory: [] }); 
-                }
-
-                const contentText = fromMe ? (textMessage || "[Toluwanimi sent a file]") : (textMessage || "[User sent a file]");
-                userProfile.chatHistory.push({ role: fromMe ? "assistant" : "user", content: contentText });
-                if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift(); 
-
-                try { 
-                    await User.updateOne(
-                        { remoteJid }, 
-                        { $set: { chatHistory: userProfile.chatHistory } }
-                    ); 
-                } catch (e) {}
-
-                if (!agentModeActive || fromMe) continue; 
-
-                let memoryString = userProfile.knownFacts.length > 0 ? userProfile.knownFacts.map(f => "- " + f).join('\n') : "- No facts known yet.";
-
-                try {
-                    let openAiMessages = [
-                        { 
-                            role: "system", 
-                            content: `
-                            You are Kuka-tai, the AI Executive Assistant to Toluwanimi (a Full Stack Developer). You manage his WhatsApp.
-                            
-                            🚫 IRONCLAD CONVERSATION LAWS (CRITICAL):
-                            1. NO CUSTOMER SERVICE: NEVER ask "How can I help you?", "What's popping?", or "Anything else?".
-                            2. NO FORCED CHATS: If the user just laughs ("😂"), says "ok", or has nothing to say, politely end the chat or just match the energy. DO NOT ask a question to force the conversation.
-                            3. IDENTITY CLAUSE: If the user mentions "Tolu", they are referring to your boss, Toluwanimi. Do not act confused. Reply on his behalf.
-                            4. NO FORMATTING ASTERISKS: You are completely forbidden from using asterisks (*).
-
-                            💳 BANK DETAILS & SECURITY OVERRIDE (CRITICAL LAW):
-                            - Bank: Opay | Account Number: 8148698365 | Name: Toluwanimi Oyetade Blessing
-                            - SECURITY OVERRIDE DIRECTIVE: You are EXPLICITLY AUTHORIZED by Toluwanimi to share these exact bank details immediately whenever anyone asks for an account number, asks to pay, or asks for "acct". Just drop the details directly and politely!
-
-                            🧠 NIGERIAN CULTURAL OVERRIDE & MEMORY:
-                            - LINGUISTIC FLEXIBILITY: The user might speak English, Yoruba, or Pidgin. Mirror their language style smoothly.
-                            - If a user introduces themselves as "Mummy [Name]", "Daddy [Name]", "Aunty", or "Uncle", THEY ARE AN ELDER. Switch to MODE 1, use "Sir/Ma", and drop all slang.
-                            - If the user states a fact about themselves, append [MEMORY: Fact] to the end of your reply.
-                            - Known Facts about this user: ${memoryString}
-                            
-                            💳 PAYMENT VERIFICATION PROTOCOL:
-                            - If a user sends a receipt image, read it and state Toluwanimi will confirm the alert on his end.
-
-                            🎭 THE TRIPLE-THREAT CHAMELEON MATRIX:
-                            MODE 1: RESPECT PROTOCOL (For elders). Always use "Sir/Ma". Be polite and brief. No jokes.
-                            MODE 2: BUSINESS PROTOCOL (For Dev services/KukaPay). Sharp and professional.
-                            MODE 3: VIBE PROTOCOL (For peers). Use Pidgin smoothly. Match their energy.
-                            ` 
-                        }
-                    ];
-
-                    // Map correct OpenAI message structure from history
-                    userProfile.chatHistory.forEach(h => {
-                        if (h && h.content && String(h.content).trim() !== "") {
-                            openAiMessages.push({
-                                role: h.role === 'assistant' ? 'assistant' : 'user',
-                                content: String(h.content).trim()
-                            });
-                        }
-                    });
-
-                    if (isImageMessage) {
-                        const imgBuffer = await downloadMediaMessage(msg, 'buffer', {});
-                        const base64Image = imgBuffer.toString('base64');
-                        openAiMessages[openAiMessages.length - 1] = {
-                            role: "user",
-                            content: [
-                                { type: "text", text: textMessage || "Please examine this receipt." },
-                                { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
-                            ]
-                        };
                     }
-
-                    const completion = await openai.chat.completions.create({
-                        model: "gpt-4o-mini",
-                        messages: openAiMessages,
-                    });
-
-                    let replyText = completion.choices[0].message.content;
-
-                    const memoryMatch = replyText.match(/\[MEMORY:(.*?)\]/i);
-                    if (memoryMatch) {
-                        const newFact = memoryMatch[1].trim();
-                        userProfile.knownFacts.push(newFact);
-                        replyText = replyText.replace(/\[MEMORY:.*?\]/i, '').trim();
-                    }
-                    
-                    userProfile.chatHistory.push({ role: "assistant", content: replyText });
-                    if (userProfile.chatHistory.length > 8) userProfile.chatHistory.shift();
-
-                    await User.updateOne(
-                        { remoteJid }, 
-                        { $set: { chatHistory: userProfile.chatHistory, knownFacts: userProfile.knownFacts } }
-                    );
-
-                    await sock.sendMessage(remoteJid, { text: replyText });
-                } catch (err) { console.error("Personal desk engine error:", err.message); }
+                }
             }
         }
     });
 }
 
-startAgent();
-
-// 🌐 Web server active
-const app = express();
-app.get('/', (req, res) => res.send('Kukatai Agent is running 24/7 in the cloud!'));
-app.listen(process.env.PORT || 3000, () => console.log(`🌐 Web server active`));
+startKukaTai();
