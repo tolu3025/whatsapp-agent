@@ -19,7 +19,7 @@ const app = express();
 app.use(express.json());
 
 // ==========================================
-// 1. DATABASE & SUPABASE CONFIG
+// 1. DATABASE & SUPABASE
 // ==========================================
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -48,14 +48,14 @@ const initSupabase = () => {
     const channel = supabase.channel('public:transactions');
     channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, async (payload) => {
         const tx = payload.new;
-        if (tx.status === 'successful' && sock) {
+        if (tx.status === 'successful' && sock && sock.authState.creds.registered) {
             const vendor = await Vendor.findOne({ phoneNumber: tx.vendor_id });
             try {
                 await sock.sendMessage(tx.customer_jid, { 
                     text: `✅ *PAYMENT CONFIRMED!*\n\nReference: ${tx.tx_ref}\nAmount: ₦${tx.amount}\n\n*${vendor?.businessName || 'The Vendor'}* has received your payment. Your order is now being processed! 🚚✨` 
                 });
-                if (vendor) await sock.sendMessage(vendor.phoneNumber, { text: `💰 *Cha-Ching!* Your Sales Agent just closed a ₦${tx.amount} deal with ${tx.customer_name}!` });
-            } catch (e) { console.log("Supabase message send failed."); }
+                if (vendor) await sock.sendMessage(vendor.phoneNumber, { text: `💰 *Alert:* Your Sales Agent closed a ₦${tx.amount} deal with ${tx.customer_name}!` });
+            } catch (e) { console.log("Supabase message failed."); }
         }
     }).subscribe();
 };
@@ -65,16 +65,12 @@ const initSupabase = () => {
 // ==========================================
 let cachedToken = null;
 let tokenExpiry = 0;
-
 async function getFlwV4Token() {
     if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
     try {
         const res = await axios.post('https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token', 
-            new URLSearchParams({
-                client_id: process.env.FLW_CLIENT_ID,
-                client_secret: process.env.FLW_CLIENT_SECRET,
-                grant_type: 'client_credentials'
-            }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+            new URLSearchParams({ client_id: process.env.FLW_CLIENT_ID, client_secret: process.env.FLW_CLIENT_SECRET, grant_type: 'client_credentials' }), 
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
         );
         cachedToken = res.data.access_token;
         tokenExpiry = Date.now() + (res.data.expires_in * 1000) - 60000;
@@ -88,38 +84,43 @@ async function verifyVendorV4(accountNumber, bankName) {
         const banks = await axios.get(`${process.env.FLW_BASE_URL}/banks/NG`, { headers: { Authorization: `Bearer ${token}` } });
         const bank = banks.data.data.find(b => b.name.toLowerCase().includes(bankName.toLowerCase()));
         if (!bank) return null;
-        const resolve = await axios.post(`${process.env.FLW_BASE_URL}/banks/account-resolve`, 
-            { account_number: accountNumber, account_bank: bank.code },
-            { headers: { Authorization: `Bearer ${token}` } }
-        );
+        const resolve = await axios.post(`${process.env.FLW_BASE_URL}/banks/account-resolve`, { account_number: accountNumber, account_bank: bank.code }, { headers: { Authorization: `Bearer ${token}` } });
         return { name: resolve.data.data.account_name, code: bank.code };
     } catch (e) { return null; }
 }
 
 // ==========================================
-// 4. WHATSAPP ENGINE (PAIRING FIXED)
+// 4. WHATSAPP ENGINE (PAIRING STABILITY FIX)
 // ==========================================
 async function startWhatsAppBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   const { version } = await fetchLatestBaileysVersion();
   
+  // Clean Logger to prevent CPU spikes on Render
+  const logger = pino({ level: 'silent' });
+
   sock = makeWASocket({
     version,
-    logger: pino({ level: 'silent' }),
+    logger,
     auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    // FIX: Standard Browser Array for Pairing Stability
+    // BROWSWER IDENTITY: Critical for Render IP reputation
     browser: ["Ubuntu", "Chrome", "121.0.6167.160"],
     
-    // RENDER FIXES
+    // --- STABILITY FLAGS ---
+    printQRInTerminal: false,
+    mobile: false,
     syncFullHistory: false, 
     fireInitQueries: false,
     shouldSyncHistoryMessage: () => false, 
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 0,
-    keepAliveIntervalMs: 10000,
+    
+    // TIMEOUTS: Increased to prevent connection death during pairing
+    connectTimeoutMs: 100000, 
+    defaultQueryTimeoutMs: 0, 
+    keepAliveIntervalMs: 20000,
+    generateHighQualityLinkPreview: false,
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -132,13 +133,13 @@ async function startWhatsAppBot() {
         hasRequestedCode = true;
         const pairingNumber = process.env.PAIRING_NUMBER;
         if (pairingNumber) {
-            console.log(`⏳ Stabilizing connection for ${pairingNumber}...`);
-            await delay(10000); // CRITICAL: Wait for socket to be ready
+            console.log(`⏳ Waiting for socket to warm up for ${pairingNumber}...`);
+            await delay(15000); // 15s delay is safer on Render
             try {
                 const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
                 console.log(`🔑 YOUR PAIRING CODE: ${code}`);
             } catch (e) {
-                console.error("Pairing Request Failed:", e.message);
+                console.error("❌ Pairing Failed:", e.message);
                 hasRequestedCode = false; 
             }
         }
@@ -146,13 +147,16 @@ async function startWhatsAppBot() {
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      hasRequestedCode = false; // Reset so code can be requested on restart
-      
-      if (code === 515 || code === 401 || code === DisconnectReason.loggedOut) {
-        console.log("🧹 Clearing session for fresh retry...");
+      console.log(`🔴 Connection Lost. Reason: ${code}`);
+      hasRequestedCode = false;
+
+      // If session is corrupt or rejected, clear it
+      if (code === 401 || code === 405 || code === DisconnectReason.loggedOut) {
+        console.log("🧹 Wiping auth_session...");
         if (fs.existsSync('./auth_session')) fs.rmSync('./auth_session', { recursive: true, force: true });
         setTimeout(startWhatsAppBot, 5000);
       } else {
+        // Standard reconnect for network glitches (515, 408)
         setTimeout(startWhatsAppBot, 10000);
       }
     } else if (connection === 'open') {
@@ -174,7 +178,6 @@ async function startWhatsAppBot() {
     if (liveVendor && !registrationState.has(sender) && !['register', 'onboard'].includes(cleanInput)) {
         return handleSalesAI(sender, text, liveVendor);
     }
-
     if (registrationState.has(sender) || ['register', 'onboard'].includes(cleanInput)) {
         return handleVendorOnboarding(sender, msg);
     }
@@ -182,61 +185,46 @@ async function startWhatsAppBot() {
 }
 
 // ==========================================
-// 5. AGENT HELPERS
+// 5. SALES & ONBOARDING LOGIC
 // ==========================================
 async function handleSalesAI(customerJid, text, vendor) {
     const input = text.toLowerCase();
     if (input.includes('price') || input.includes('catalog')) {
         const items = vendor.catalog.map(i => `🛍️ *${i.caption}*\n💰 ₦${i.price.toLocaleString()}\n`).join('\n');
-        await sock.sendMessage(customerJid, { text: `You have great taste! 😍 Here's what *${vendor.businessName}* has:\n\n${items}` });
+        await sock.sendMessage(customerJid, { text: `You have great taste! 😍 Check out what *${vendor.businessName}* has:\n\n${items}` });
     } else if (input.includes('buy') || input.match(/\d+/)) {
         try {
             const res = await axios.post('https://api.flutterwave.com/v3/payments', {
                 tx_ref: `KUKA-${Date.now()}`, amount: "5000", currency: "NGN", 
                 customer: { email: "customer@kuka.ai" }, customizations: { title: vendor.businessName }
             }, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
-            await sock.sendMessage(customerJid, { text: `Secure checkout link: ${res.data.data.link}` });
-        } catch (e) { await sock.sendMessage(customerJid, { text: "Glitch! Try 'buy' again." }); }
+            await sock.sendMessage(customerJid, { text: `Secure checkout: ${res.data.data.link}` });
+        } catch (e) { await sock.sendMessage(customerJid, { text: "Glitch! Say 'buy' again." }); }
     } else {
-        await sock.sendMessage(customerJid, { text: `Hello! 🌟 Welcome to *${vendor.businessName}*. Ask for our prices to start!` });
+        await sock.sendMessage(customerJid, { text: `Hello! 🌟 Welcome to *${vendor.businessName}*. Ask for our prices!` });
     }
 }
 
 async function handleVendorOnboarding(sender, msg) {
     if (!registrationState.has(sender)) {
         registrationState.set(sender, { step: 'name' });
-        return sock.sendMessage(sender, { text: "Hello Vendor! 👋 Business Name?" });
+        return sock.sendMessage(sender, { text: "Hello Vendor! Business Name?" });
     }
     const state = registrationState.get(sender);
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
-
     switch (state.step) {
-        case 'name':
-            state.businessName = text; state.step = 'bank';
-            await sock.sendMessage(sender, { text: "Bank Name?" });
-            break;
-        case 'bank':
-            state.bankName = text; state.step = 'account';
-            await sock.sendMessage(sender, { text: "Account Number?" });
-            break;
+        case 'name': state.businessName = text; state.step = 'bank'; await sock.sendMessage(sender, { text: "Bank Name?" }); break;
+        case 'bank': state.bankName = text; state.step = 'account'; await sock.sendMessage(sender, { text: "Account Number?" }); break;
         case 'account':
             const v = await verifyVendorV4(text, state.bankName);
-            if (!v) { state.step = 'bank'; return sock.sendMessage(sender, { text: "Verification failed. Bank Name?" }); }
+            if (!v) { state.step = 'bank'; return sock.sendMessage(sender, { text: "Failed. Bank Name?" }); }
             state.accountName = v.name; state.accountNumber = text; state.step = 'confirm';
-            await sock.sendMessage(sender, { text: `Is this you: *${v.name}*?` });
-            break;
+            await sock.sendMessage(sender, { text: `Confirm: *${v.name}*?` }); break;
         case 'confirm':
-            if (text.toLowerCase() === 'yes') { state.step = 'desc'; await sock.sendMessage(sender, { text: "Business Description?" }); }
-            else { state.step = 'bank'; await sock.sendMessage(sender, { text: "Bank Name?" }); }
-            break;
-        case 'desc':
-            state.description = text; state.step = 'faq';
-            await sock.sendMessage(sender, { text: "FAQ?" });
-            break;
-        case 'faq':
-            state.faq = text; state.step = 'catalog'; state.catalog = [];
-            await sock.sendMessage(sender, { text: "Catalog Photos + Prices. Type Done." });
-            break;
+            if (text.toLowerCase() === 'yes') { state.step = 'desc'; await sock.sendMessage(sender, { text: "Description?" }); }
+            else { state.step = 'bank'; await sock.sendMessage(sender, { text: "Bank Name?" }); } break;
+        case 'desc': state.description = text; state.step = 'faq'; await sock.sendMessage(sender, { text: "FAQ?" }); break;
+        case 'faq': state.faq = text; state.step = 'catalog'; state.catalog = []; await sock.sendMessage(sender, { text: "Catalog photos + Price in caption. Type Done." }); break;
         case 'catalog':
             if (text.toLowerCase() === 'done') {
                 const newVendor = new Vendor({ ...state, phoneNumber: sender, isLive: true });
@@ -246,17 +234,11 @@ async function handleVendorOnboarding(sender, msg) {
                 const cap = msg.message.imageMessage.caption || "";
                 state.catalog.push({ imageUrl: "received", caption: cap, price: parseInt(cap.match(/\d+/)?.[0]) || 0 });
                 await sock.sendMessage(sender, { text: "✅ Added! Next or Done." });
-            }
-            break;
+            } break;
     }
     registrationState.set(sender, state);
 }
 
-// ==========================================
-// 6. INIT
-// ==========================================
 initSupabase(); 
 startWhatsAppBot();
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Running on ${PORT}`));
+app.listen(process.env.PORT || 10000);
