@@ -15,6 +15,7 @@ const mongoose = require('mongoose');
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const express = require('express');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -39,7 +40,7 @@ const VendorSchema = new mongoose.Schema({
 });
 
 const GroupSchema = new mongoose.Schema({
-  groupId: { type: String, required: true, unique: true }, // JID from WhatsApp (@g.us)
+  groupId: { type: String, required: true, unique: true },
   vendorPhoneNumber: { type: String, required: true },
   groupName: { type: String },
   status: { type: String, enum: ['onboarding', 'active', 'closed'], default: 'onboarding' },
@@ -77,9 +78,6 @@ let accessToken = null;
 let tokenExpiresAt = 0;
 let bankCache = [];
 
-/**
- * Dynamically obtains OAuth2 Token for Live Flutterwave v4.
- */
 async function getAuthToken() {
   if (accessToken && Date.now() < tokenExpiresAt) {
     return accessToken;
@@ -108,9 +106,6 @@ async function getAuthToken() {
   }
 }
 
-/**
- * Fetch and cache banks from Live Flutterwave v4.
- */
 async function fetchAndCacheBanks() {
   try {
     const token = await getAuthToken();
@@ -134,22 +129,16 @@ async function fetchAndCacheBanks() {
   }
 }
 
-// Initial bank pull and refresh loop every 24 hours
 fetchAndCacheBanks();
 setInterval(fetchAndCacheBanks, 24 * 60 * 60 * 1000);
 
-/**
- * Smart Match Bank Autocomplete Suggestion Tool
- */
 function suggestBank(inputName) {
   if (!inputName) return null;
   const cleanInput = inputName.trim().toUpperCase();
 
-  // Try direct match
   let match = bankCache.find(b => b.name === cleanInput || b.name.includes(cleanInput));
   if (match) return match;
 
-  // Exact abbreviation dictionaries to match user prompts
   const abbreviations = {
     'GTB': 'GUARANTY TRUST',
     'GTBANK': 'GUARANTY TRUST',
@@ -170,7 +159,6 @@ function suggestBank(inputName) {
     if (match) return match;
   }
 
-  // Multi-word lookup matching
   const matches = bankCache.filter(b => {
     return cleanInput.split(' ').every(word => b.name.includes(word));
   });
@@ -178,9 +166,6 @@ function suggestBank(inputName) {
   return matches.length > 0 ? matches[0] : null;
 }
 
-/**
- * Resolve Account Number using v4 payload rules on Live Endpoint
- */
 async function verifyAccountNumber(accountNumber, bankCode) {
   try {
     const token = await getAuthToken();
@@ -208,28 +193,20 @@ async function verifyAccountNumber(accountNumber, bankCode) {
 }
 
 // ====================================================================
-// 4. WHATSAPP BOT ENGINE (DESKTOP CHROME / KUKATAI-AGENT MATCHED)
+// 4. WHATSAPP BOT ENGINE WITH AUTO-DECRYPT RECOVERY
 // ====================================================================
 const registrationState = new Map();
 
 const REGISTRATION_TRIGGERS = [
-  '!register',
-  'register',
-  'i want to register',
-  'onboard me',
-  'create vendor account',
-  'sign up',
-  'vendor registration',
-  'want to onboard'
+  '!register', 'register', 'i want to register', 'onboard me',
+  'create vendor account', 'sign up', 'vendor registration', 'want to onboard'
 ];
 
-// Tracking to prevent pairing loop spam
 let hasRequestedCode = false;
 
 async function startWhatsAppBot() {
   console.log('🚀 Initializing WhatsApp connection...');
 
-  // Fetch the absolute latest WhatsApp version dynamically to bypass the 405 error
   let version = [2, 3000, 1017578213]; 
   try {
     const { version: latestVersion } = await fetchLatestBaileysVersion();
@@ -239,19 +216,15 @@ async function startWhatsAppBot() {
     console.warn('⚠️ Could not fetch latest WA version dynamically, using fallback version.', err.message);
   }
 
-  // Initialize auth state
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: false, // Must be false for pairing code usage
+    printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
     
-    // =====================================================================
-    // 🖥️ PERFECT OS & USER AGENT PAIRING FINGERPRINT 
-    // =====================================================================
-    // Matches the "Google Chrome (Mac OS)" and "kukatai-agent" identity exactly!
+    // Explicit browser fingerprint representing "Google Chrome (Mac OS)"
     browser: ['Mac OS', 'Chrome', '10.0.0'], 
     name: 'kukatai-agent',
 
@@ -262,20 +235,17 @@ async function startWhatsAppBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Connection State Update
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Trigger pairing code generation only if qr event fires, we are not registered, and haven't requested yet
     if (qr && !sock.authState.creds.registered && !hasRequestedCode) {
-      hasRequestedCode = true; // Lock immediately to prevent concurrent loops
+      hasRequestedCode = true; 
       const pairingNumber = process.env.PAIRING_NUMBER;
       
       if (pairingNumber) {
         const cleanNumber = pairingNumber.replace(/[^0-9]/g, '');
         try {
           console.log(`⏳ Handshake successful. Generating pairing code for +${cleanNumber}...`);
-          // Adding a 5-second buffer delay to ensure socket channels are completely ready
           await delay(5000); 
           const code = await sock.requestPairingCode(cleanNumber);
           console.log(`🔑 ================================================`);
@@ -283,7 +253,7 @@ async function startWhatsAppBot() {
           console.log(`🔑 ================================================`);
         } catch (err) {
           console.error('🔴 Error generating WhatsApp Pairing Code:', err.message || err);
-          hasRequestedCode = false; // Release lock so it can retry on a clean refresh
+          hasRequestedCode = false; 
         }
       } else {
         console.log('⚠️ PAIRING_NUMBER environment variable is missing.');
@@ -295,15 +265,20 @@ async function startWhatsAppBot() {
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       
       console.log(`🔴 Connection closed. Status Code: ${statusCode}. Reconnecting: ${shouldReconnect}`);
-      
-      // Reset the lock when connection closes so it can pair again on restart if needed
       hasRequestedCode = false;
 
-      // ====================================================================
-      // ⚡ IMMEDIATE 515/RESTART RECONNECT (CRITICAL FOR FINALIZING PAIRS)
-      // ====================================================================
+      // Force instant clean-restart on protocol stream requests
       if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
-        console.log('⚡ Immediate restart payload received. finalising paired state securely now...');
+        console.log('⚡ Immediate restart payload received. Reconnecting to finalize paired state...');
+        startWhatsAppBot();
+      } else if (statusCode === 411 || statusCode === 412) {
+        // Automatically delete corrupted prekeys / session state on bad sync disconnect codes
+        console.warn('⚠️ Session desynchronization detected. Clearing auth cache directories...');
+        try {
+          fs.rmSync('auth_session', { recursive: true, force: true });
+        } catch (e) {
+          console.error('Failed to clear auth_session directory:', e.message);
+        }
         startWhatsAppBot();
       } else if (shouldReconnect) {
         console.log('⏳ Waiting 10 seconds before attempting reconnection...');
@@ -313,14 +288,20 @@ async function startWhatsAppBot() {
       }
     } else if (connection === 'open') {
       console.log('🟢 WhatsApp Connection successfully opened!');
-      hasRequestedCode = false; // Reset lock on successful link
+      hasRequestedCode = false;
     }
   });
 
+  // Safe Decryption Filter (Skips processing bad/broken session updates silently)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
+        // Silently skip if message has invalid/undecryptable content to prevent crashes
+        if (msg.messageStubType === 'CIPHERTEXT') {
+          console.warn('⚠️ Skipping a message context that cannot be decrypted.');
+          continue;
+        }
         await handleWhatsAppFlow(sock, msg);
       } catch (err) {
         console.error('🔴 Message handler error:', err);
@@ -340,7 +321,7 @@ async function handleWhatsAppFlow(sock, msg) {
   if (!messageText) return;
   const cleanInput = messageText.toLowerCase().trim();
 
-  // --- PRIVATE CHATS: CONVERSATIONAL ONBOARDING WIZARD ---
+  // Private Chats
   if (!isGroup) {
     if (registrationState.has(sender)) {
       await handleRegistrationWizard(sock, sender, messageText);
@@ -361,7 +342,7 @@ async function handleWhatsAppFlow(sock, msg) {
     }
   }
 
-  // --- GROUP CHATS: ESCROW MANAGEMENT ---
+  // Group Chats
   if (isGroup) {
     if (cleanInput.startsWith('!init-escrow')) {
       const senderPhone = msg.key.participant || msg.key.fromMe;
@@ -422,9 +403,6 @@ async function handleWhatsAppFlow(sock, msg) {
   }
 }
 
-/**
- * Handles Onboarding Steps Sequentially and Triggers Tasks list upon validation
- */
 async function handleRegistrationWizard(sock, sender, text) {
   const state = registrationState.get(sender);
 
@@ -472,7 +450,6 @@ async function handleRegistrationWizard(sock, sender, text) {
         return;
       }
 
-      // Save verified Vendor data
       const newVendor = new Vendor({
         phoneNumber: sender,
         businessName: state.businessName,
@@ -487,7 +464,6 @@ async function handleRegistrationWizard(sock, sender, text) {
       await newVendor.save();
       registrationState.delete(sender);
 
-      // Welcome Message + Dynamic Onboarding Tasks
       await sock.sendMessage(sender, { 
         text: `🎉 *Onboarding Successful!*\n\n*Merchant:* ${newVendor.businessName}\n*Verified Settlement Name:* ${newVendor.accountName}\n*Bank Name:* ${newVendor.bankName}\n\nYour Live settlement account has been linked successfully.\n\n-----------------------------\n📋 *YOUR ONBOARDING TASKS*\n-----------------------------\n\nTo activate and test your escrow setup, complete the following steps:\n\n1️⃣ *Initialize Your Group Escrow*\nGo to any WhatsApp transactional group where you sell products and type:\n👉 \`!init-escrow\`\n\n2️⃣ *Simulate a Customer Purchase*\nHave a buyer in that group (or your own secondary number) initiate a deal by typing:\n👉 \`!buy 10000\` (replacing 10000 with any test transaction amount).\n\n3️⃣ *Review Your Dashboard Insights*\nLog in to your Supabase merchant panel to verify that your business profile and newly initialized transaction logs sync immediately.\n\nLet me know if you run into any issues during setup!` 
       });
