@@ -4,7 +4,7 @@ const {
   useMultiFileAuthState, 
   DisconnectReason, 
   delay,
-  fetchLatestBaileysVersion,
+  fetchLatestBaileysVersion, // CRITICAL: To fix 405
   makeCacheableSignalKeyStore,
   jidNormalizedUser 
 } = require('@whiskeysockets/baileys');
@@ -19,7 +19,7 @@ const app = express();
 app.use(express.json());
 
 // ==========================================
-// 1. DATABASE & SUPABASE
+// 1. DATABASE & SUPABASE CONFIG
 // ==========================================
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -51,21 +51,23 @@ const initSupabase = () => {
             const v = await Vendor.findOne({ phoneNumber: tx.vendor_id });
             try {
                 await sock.sendMessage(tx.customer_jid, { 
-                    text: `✅ *PAYMENT CONFIRMED!*\n\nHello! I've received your payment of *₦${tx.amount.toLocaleString()}*.\n\n*${v?.businessName || 'The Vendor'}* is now processing your order! 🚚✨` 
+                    text: `✅ *PAYMENT CONFIRMED!*\n\n*${v?.businessName || 'The Vendor'}* has received your payment of *₦${tx.amount.toLocaleString()}*.\n\nYour order is now being processed! 🚚` 
                 });
-            } catch (e) { console.log("Supabase msg fail"); }
+            } catch (e) { console.log("Supabase notify failed"); }
         }
     }).subscribe();
 };
 
 // ==========================================
-// 3. WHATSAPP ENGINE (PAIRING HANDSHAKE FIX)
+// 3. WHATSAPP ENGINE (FIXED FOR 405 ERROR)
 // ==========================================
 async function startWhatsAppBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   
-  // Use a hardcoded recent version to prevent fetch-delays on Render
-  const version = [2, 3000, 1015901307]; 
+  // FETCH LATEST VERSION DYNAMICALLY
+  console.log('📡 Fetching latest WhatsApp version...');
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  console.log(`✅ Using WA Version: ${version.join('.')} (Latest: ${isLatest})`);
 
   sock = makeWASocket({
     version,
@@ -74,18 +76,16 @@ async function startWhatsAppBot() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    // FIX: Exact Browser Array for Device Recognition
-    browser: ["Windows", "Chrome", "110.0.5481.178"], 
+    // MODERN BROWSER IDENTITY: To bypass 405/401 flags
+    browser: ["Mac OS", "Chrome", "126.0.0.0"], 
     
     syncFullHistory: false, 
     fireInitQueries: false,
     shouldSyncHistoryMessage: () => false, 
     
-    // Pairing Stability
-    connectTimeoutMs: 120000, 
-    defaultQueryTimeoutMs: 90000, 
+    connectTimeoutMs: 60000, 
+    defaultQueryTimeoutMs: 0, 
     keepAliveIntervalMs: 15000,
-    generateHighQualityLinkPreview: false,
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -93,22 +93,20 @@ async function startWhatsAppBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // --- SECURE PAIRING HANDSHAKE ---
+    // --- SECURE PAIRING CODE REQUEST ---
     if (!sock.authState.creds.registered && !hasRequestedCode) {
         hasRequestedCode = true;
         const pairingNumber = process.env.PAIRING_NUMBER;
         
         if (pairingNumber) {
-            console.log(`⏳ Initializing Device Identity for ${pairingNumber}...`);
-            
-            // Allow the socket to complete the internal crypto handshake
-            await delay(10000); 
+            console.log(`⏳ Authenticating device for ${pairingNumber}...`);
+            await delay(12000); // Allow socket to stabilize fully
             
             try {
                 const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
                 console.log(`🔑 YOUR PAIRING CODE: ${code}`);
             } catch (e) {
-                console.error("❌ Pairing Handshake Denied:", e.message);
+                console.error("❌ Pairing Denied by Server:", e.message);
                 hasRequestedCode = false; 
             }
         }
@@ -116,18 +114,19 @@ async function startWhatsAppBot() {
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      console.log(`🔴 Connection Lost. Reason: ${code}`);
+      console.log(`🔴 Connection Closed. Code: ${code}`);
       hasRequestedCode = false;
 
-      // Wipe session only on total auth failure
-      if (code === 401 || code === DisconnectReason.loggedOut) {
+      // If 405 (Version error) or 401 (Auth error), we MUST wipe the session
+      if (code === 405 || code === 401 || code === DisconnectReason.loggedOut) {
+        console.log("🧹 Incompatible Version or Auth Error. Wiping session...");
         if (fs.existsSync('./auth_session')) fs.rmSync('./auth_session', { recursive: true, force: true });
         setTimeout(startWhatsAppBot, 5000);
       } else {
         setTimeout(startWhatsAppBot, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 SUCCESS: Device Linked & Agent Online!');
+      console.log('🟢 SUCCESS: Device Linked & Sales Agent Online!');
       hasRequestedCode = false;
     }
   });
@@ -161,9 +160,9 @@ async function handleSalesAI(customerJid, text, vendor) {
     
     if (input.includes('price') || input.includes('catalog')) {
         const items = vendor.catalog.map(i => `🛍️ *${i.caption}*\n💰 ₦${i.price.toLocaleString()}\n`).join('\n');
-        await sock.sendMessage(customerJid, { text: `Omo! You have great taste! 😍 Check out our catalog for *${vendor.businessName}*:\n\n${items}` });
+        await sock.sendMessage(customerJid, { text: `You have amazing taste! 😍 Check out our catalog for *${vendor.businessName}*:\n\n${items}` });
     } 
-    else if (input.includes('buy') || input.includes('order') || input.match(/\d+/)) {
+    else if (input.includes('buy') || input.match(/\d+/)) {
         try {
             const res = await axios.post('https://api.flutterwave.com/v3/payments', {
                 tx_ref: `KUKA-${Date.now()}`, amount: "5000", currency: "NGN", 
@@ -171,13 +170,13 @@ async function handleSalesAI(customerJid, text, vendor) {
                 customizations: { title: vendor.businessName }
             }, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
             
-            await sock.sendMessage(customerJid, { text: `Let's close this deal! 🚀 Pay securely here:\n\n${res.data.data.link}\n\nI'll confirm your order immediately once it's done! ✅` });
+            await sock.sendMessage(customerJid, { text: `Let's get this deal closed! 🚀 You can pay securely here:\n\n${res.data.data.link}\n\nI'll confirm immediately once it's done! ✅` });
         } catch (e) {
             await sock.sendMessage(customerJid, { text: "Oops! Link error. Try 'buy' again! 🙏" });
         }
     }
     else {
-        await sock.sendMessage(customerJid, { text: `Welcome to *${vendor.businessName}*! 🌟 I'm here to find you the best deals. Ask for our catalog to start!` });
+        await sock.sendMessage(customerJid, { text: `Welcome to *${vendor.businessName}*! 🌟 I'm here to help you. Ask for our catalog to start shopping! 😊` });
     }
 }
 
@@ -203,7 +202,7 @@ async function handleVendorOnboarding(sender, msg) {
             break;
         case 'account':
             state.accountNumber = text; state.step = 'confirm';
-            await sock.sendMessage(sender, { text: `Please verify your details manually, then reply *Yes* to continue.` });
+            await sock.sendMessage(sender, { text: `Please verify your bank details, then reply *Yes* to continue.` });
             break;
         case 'confirm':
             if (text.toLowerCase() === 'yes') {
