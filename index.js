@@ -6,197 +6,123 @@ const {
   delay,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  jidNormalizedUser 
+  jidNormalizedUser,
+  downloadContentFromMessage 
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
-const { createClient } = require('@supabase/supabase-js');
-const OpenAI = require('openai');
 const axios = require('axios');
-const fs = require('fs');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
-// ==========================================
-// 1. SYSTEM & DATABASE INITIALIZATION
-// ==========================================
 const app = express();
 app.use(express.json());
 
-// Start the server immediately so Render doesn't kill the app during pairing
-const PORT = process.env.PORT || 10000;
-app.get('/', (req, res) => res.send('Kukatai PA Agent is Online'));
-app.listen(PORT, () => console.log(`🚀 Health Check Active on Port ${PORT}`));
-
+// ==========================================
+// 1. DATABASE & CONFIG
+// ==========================================
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// ==========================================
-// 2. DATA MODELS
-// ==========================================
 const Vendor = mongoose.model('Vendor', new mongoose.Schema({
   phoneNumber: { type: String, required: true, unique: true },
-  businessName: String,
-  email: String,
-  bankCode: String,
+  businessName: String, 
   bankName: String,
+  bankCode: String,
   accountNumber: String,
   accountName: String,
-  flwSubaccountId: String,
-  description: String,
-  faqs: String,
-  catalog: [{ imageUrl: String, caption: String, price: Number }],
-  activeGroups: [String],
-  onboardingStep: { type: String, default: 'none' },
+  businessDescription: String,
+  faq: String,
+  catalog: [{ imageUrl: String, caption: String }],
   isApproved: { type: Boolean, default: false }
 }));
 
-const Transaction = mongoose.model('Transaction', new mongoose.Schema({
-  txRef: { type: String, unique: true },
-  customerPhone: String,
-  vendorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor' },
-  amount: Number,
-  status: { type: String, enum: ['pending', 'success'], default: 'pending' },
-  virtualAccount: String,
-  createdAt: { type: Date, default: Date.now }
-}));
+const REGISTRATION_TRIGGERS = ['register', 'i want to register', 'onboard'];
+const registrationState = new Map();
+let hasRequestedCode = false;
 
-// ==========================================
-// 3. FLUTTERWAVE V4 SERVICE
-// ==========================================
-class FlutterwaveService {
-  constructor() {
-    this.token = null;
-    this.expiry = 0;
-    this.bankCache = [];
-  }
-
-  async getAuth() {
-    if (this.token && Date.now() < this.expiry) return this.token;
-    const res = await axios.post('https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token', 
-      new URLSearchParams({ client_id: process.env.FLW_CLIENT_ID, client_secret: process.env.FLW_CLIENT_SECRET, grant_type: 'client_credentials' }));
-    this.token = res.data.access_token;
-    this.expiry = Date.now() + (res.data.expires_in - 60) * 1000;
-    return this.token;
-  }
-
-  async fetchBanks() {
-    const token = await this.getAuth();
-    const res = await axios.get(`${process.env.FLW_BASE_URL}/banks?country=NG`, { headers: { Authorization: `Bearer ${token}` } });
-    this.bankCache = res.data.data;
-  }
-
-  async verifyAccount(number, code) {
-    const token = await this.getAuth();
+// Helper to fetch Bank Code from Flutterwave
+async function getBankCode(bankName) {
     try {
-      const res = await axios.post(`${process.env.FLW_BASE_URL}/banks/account-resolve`, { account: { code, number }, currency: 'NGN' }, { headers: { Authorization: `Bearer ${token}` } });
-      return res.data.data;
-    } catch (e) { return null; }
-  }
-
-  async createSubaccount(vendor) {
-    const token = await this.getAuth();
-    const res = await axios.post(`${process.env.FLW_BASE_URL}/subaccounts`, {
-      account_bank: vendor.bankCode,
-      account_number: vendor.accountNumber,
-      business_name: vendor.businessName,
-      business_email: vendor.email || 'vendor@kukatapai.com',
-      split_type: "percentage",
-      split_value: 0.05 // Your 5% commission
-    }, { headers: { Authorization: `Bearer ${token}` } });
-    return res.data.data.subaccount_id;
-  }
-
-  async createVirtualAccount(amount, subaccountId) {
-    const token = await this.getAuth();
-    const txRef = `KUKA-${Date.now()}`;
-    const res = await axios.post(`${process.env.FLW_BASE_URL}/virtual-account-numbers`, {
-      email: "sales@kukatapai.com", amount, currency: "NGN", tx_ref: txRef,
-      is_permanent: false, frequency: 1, subaccounts: [{ id: subaccountId }]
-    }, { headers: { Authorization: `Bearer ${token}` } });
-    return { ...res.data.data, txRef };
-  }
+        const res = await axios.get('https://api.flutterwave.com/v3/banks/NG', {
+            headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` }
+        });
+        const banks = res.data.data;
+        const match = banks.find(b => b.name.toLowerCase().includes(bankName.toLowerCase()));
+        return match ? match.code : null;
+    } catch (e) {
+        return null;
+    }
 }
-const flw = new FlutterwaveService();
+
+// Helper to resolve Account Number
+async function verifyBankAccount(accountNumber, bankCode) {
+    try {
+        const res = await axios.post('https://api.flutterwave.com/v3/accounts/resolve', 
+        { account_number: accountNumber, account_bank: bankCode },
+        { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
+        return res.data.data.account_name;
+    } catch (e) {
+        return null;
+    }
+}
 
 // ==========================================
-// 4. WHATSAPP BOT ENGINE
+// 2. THE WHATSAPP ENGINE
 // ==========================================
-let pairingRequested = false;
-
-async function startAgent() {
-  console.log('📡 Starting WhatsApp Handshake...');
+async function startWhatsAppBot() {
+  console.log('📡 Fetching latest WhatsApp protocol version...');
   
-  // FETCH LATEST VERSION DYNAMICALLY
-  let version = [2, 3000, 1017578213]; // Fallback
+  let version;
   try {
-    const { version: latestVersion } = await fetchLatestBaileysVersion();
+    const { version: latestVersion, isLatest } = await fetchLatestBaileysVersion();
     version = latestVersion;
-    console.log(`✅ Using WA Protocol Version: ${version.join('.')}`);
-  } catch (e) { console.log('⚠️ Could not fetch latest version, using fallback.'); }
+    console.log(`✅ Using WA Version: ${version.join('.')} (Latest: ${isLatest})`);
+  } catch (err) {
+    version = [2, 3000, 1017578213];
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
-
+  
   const sock = makeWASocket({
     version,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    logger: pino({ level: 'silent' }),
-    
-    // GENERIC DESKTOP CHROME IDENTITY
-    browser: ['Chrome (Desktop)', '', ''], 
-    
+    printQRInTerminal: false,
+    logger: pino({ level: 'error' }),
+    browser: ['Ubuntu', 'Chrome', '114.0.5735.198'], 
     syncFullHistory: false,
-    shouldSyncHistoryMessage: () => false,
-    connectTimeoutMs: 60000,
-    keepAliveIntervalMs: 15000,
-    generateHighQualityLinkPreview: true,
   });
 
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
-
-    if (qr && !sock.authState.creds.registered && !pairingRequested) {
-      pairingRequested = true;
+    if (qr && !sock.authState.creds.registered && !hasRequestedCode) {
+      hasRequestedCode = true;
       const pairingNumber = process.env.PAIRING_NUMBER;
       if (pairingNumber) {
-        console.log(`⏳ Stabilizing socket for pairing...`);
-        await delay(10000); 
+        await delay(10000);
         try {
           const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
           console.log(`🔑 YOUR PAIRING CODE: ${code}`);
-        } catch (e) { 
-            console.error("Pairing request failed:", e.message);
-            pairingRequested = false; 
-        }
+        } catch (e) { hasRequestedCode = false; }
       }
     }
 
     if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      pairingRequested = false;
-      
-      console.log(`🔴 Connection Lost (Status: ${statusCode})`);
-
-      // AUTO-HEALING: If session is poisoned, wipe and restart
-      if (statusCode === 405 || statusCode === 401 || statusCode === DisconnectReason.badSession) {
-        console.log('🧹 Session corrupted. Wiping auth_session folder...');
+      const code = lastDisconnect?.error?.output?.statusCode;
+      if (code === 405 || code === 401 || code === DisconnectReason.loggedOut) {
         if (fs.existsSync('./auth_session')) fs.rmSync('./auth_session', { recursive: true, force: true });
-        setTimeout(startAgent, 10000);
-      } else if (statusCode !== DisconnectReason.loggedOut) {
-        setTimeout(startAgent, 5000);
+        setTimeout(startWhatsAppBot, 5000);
+      } else {
+        setTimeout(startWhatsAppBot, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 SUCCESS: AGENT IS CONNECTED AND ONLINE');
-      pairingRequested = false;
-      await flw.fetchBanks();
-      initSupabaseObserver(sock);
-      startCatalogLoop(sock);
+      console.log('🟢 SUCCESS: Agent is Online!');
+      hasRequestedCode = false;
     }
   });
 
@@ -206,107 +132,129 @@ async function startAgent() {
     if (!msg.message || msg.key.fromMe) return;
 
     const sender = jidNormalizedUser(msg.key.remoteJid);
-    const rawText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "");
-    const cleanText = rawText.toLowerCase().trim();
+    const messageText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+    const cleanInput = messageText.toLowerCase().trim();
 
-    console.log(`📩 [${sender}]: ${cleanText}`);
-
-    const vendor = await Vendor.findOne({ phoneNumber: sender }) || await Vendor.findOne({ isApproved: true });
-
-    // ONBOARDING
-    if (vendor && vendor.onboardingStep !== 'none' && vendor.onboardingStep !== 'completed') {
-      return handleOnboarding(sock, sender, rawText, vendor);
+    if (registrationState.has(sender)) {
+      await handleRegistrationWizard(sock, sender, msg);
+      return;
     }
 
-    // REGISTRATION
-    if (cleanText === "i want to register") {
-      await Vendor.findOneAndUpdate({ phoneNumber: sender }, { onboardingStep: 'askName' }, { upsert: true });
-      return sock.sendMessage(sender, { text: "👋 Welcome! I am your AI Sales PA. What is your *Official Business Name*?" });
-    }
-
-    // AI SALES CHAT
-    if (vendor && vendor.isApproved) {
-      await sock.sendPresenceUpdate('composing', sender);
-      const aiResponse = await getAIResponse(rawText, vendor);
-
-      if (aiResponse.includes("TRIGGER_PAYMENT:")) {
-        const amount = aiResponse.split(":")[1].trim();
-        const pay = await flw.createVirtualAccount(amount, vendor.flwSubaccountId);
-        await new Transaction({ txRef: pay.txRef, customerPhone: sender, vendorId: vendor._id, amount, virtualAccount: pay.account_number }).save();
-        await sock.sendMessage(sender, { text: `💰 *Secure Payment Generated!* \n\nPlease transfer ₦${amount} to:\n🏦 *${pay.bank_name}*\n🔢 *${pay.account_number}*\n\nI'll confirm the deal the moment it lands! ✨` });
-      } else {
-        await sock.sendMessage(sender, { text: aiResponse });
-      }
+    if (REGISTRATION_TRIGGERS.some(t => cleanInput.includes(t))) {
+      registrationState.set(sender, { step: 'businessName' });
+      await sock.sendMessage(sender, { text: 'Welcome! Let’s get you started.\n\nWhat is your *Business Name*?' });
     }
   });
 }
 
-// ==========================================
-// 5. HELPER LOGIC (Onboarding, AI, Observers)
-// ==========================================
-async function handleOnboarding(sock, sender, input, vendor) {
-  switch (vendor.onboardingStep) {
-    case 'askName':
-      vendor.businessName = input; vendor.onboardingStep = 'askBank';
-      await vendor.save();
-      await sock.sendMessage(sender, { text: "Got it. Which *Bank* (e.g. Opay, Zenith, GTB) do you use?" });
+async function handleRegistrationWizard(sock, sender, msg) {
+  const state = registrationState.get(sender);
+  const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+  const cleanText = text.toLowerCase().trim();
+
+  switch (state.step) {
+    case 'businessName':
+      state.businessName = text;
+      state.step = 'bank';
+      registrationState.set(sender, state);
+      await sock.sendMessage(sender, { text: 'Got it! What is your *Bank Name*? (e.g., GTBank, Zenith)' });
       break;
-    case 'askBank':
-      const bank = flw.bankCache.find(b => b.name.toLowerCase().includes(input.toLowerCase()));
-      if (!bank) return sock.sendMessage(sender, { text: "⚠️ Bank not found. Please type the full name (e.g. Guaranty Trust Bank):" });
-      vendor.bankName = bank.name; vendor.bankCode = bank.code;
-      vendor.onboardingStep = 'askAcc'; await vendor.save();
-      await sock.sendMessage(sender, { text: `Bank Set: *${bank.name}*. Now, send your *10-digit Account Number*:` });
+
+    case 'bank':
+      const bankCode = await getBankCode(text);
+      if (!bankCode) {
+        await sock.sendMessage(sender, { text: 'Sorry, I couldn’t find that bank. Please type the full name correctly:' });
+      } else {
+        state.bankName = text;
+        state.bankCode = bankCode;
+        state.step = 'account';
+        registrationState.set(sender, state);
+        await sock.sendMessage(sender, { text: `Found ${text}. Now, send your *10-digit Account Number*:` });
+      }
       break;
-    case 'askAcc':
-      const verified = await flw.verifyAccount(input.trim(), vendor.bankCode);
-      if (!verified) return sock.sendMessage(sender, { text: "❌ Verification failed. Please re-send the 10-digit number:" });
-      vendor.accountNumber = input.trim(); vendor.accountName = verified.account_name;
-      vendor.onboardingStep = 'finalize'; await vendor.save();
-      await sock.sendMessage(sender, { text: `✅ Verified: *${verified.account_name}*\n\nFinal step: Send a short *Business Description*:` });
+
+    case 'account':
+      if (text.length !== 10) {
+        await sock.sendMessage(sender, { text: 'Please send a valid 10-digit account number.' });
+        return;
+      }
+      await sock.sendMessage(sender, { text: '🔍 Verifying account details with Flutterwave...' });
+      const accountName = await verifyBankAccount(text, state.bankCode);
+      if (!accountName) {
+        await sock.sendMessage(sender, { text: '❌ Could not verify account. Please check the number and bank name, then try again:' });
+        state.step = 'bank'; // Reset to bank step
+      } else {
+        state.accountNumber = text;
+        state.accountName = accountName;
+        state.step = 'confirmAccount';
+        registrationState.set(sender, state);
+        await sock.sendMessage(sender, { text: `Is this your account name?\n\n*${accountName}*\n\nReply *Yes* to continue or *No* to restart.` });
+      }
       break;
-    case 'finalize':
-      vendor.description = input;
-      vendor.flwSubaccountId = await flw.createSubaccount(vendor);
-      vendor.onboardingStep = 'completed'; vendor.isApproved = true;
-      await vendor.save();
-      await sock.sendMessage(sender, { text: `🎉 *Registration Complete!*\n\nBusiness: ${vendor.businessName}\nStatus: Active. I am now your PA!` });
+
+    case 'confirmAccount':
+      if (cleanText === 'yes') {
+        state.step = 'description';
+        registrationState.set(sender, state);
+        await sock.sendMessage(sender, { text: 'Great! Now, please provide a short *Business Description* (What do you sell/do?):' });
+      } else {
+        state.step = 'bank';
+        await sock.sendMessage(sender, { text: 'Let’s try again. What is your *Bank Name*?' });
+      }
+      break;
+
+    case 'description':
+      state.description = text;
+      state.step = 'faq';
+      registrationState.set(sender, state);
+      await sock.sendMessage(sender, { text: 'Provide a common *FAQ* (e.g., "Do you deliver? Yes, nationwide."):' });
+      break;
+
+    case 'faq':
+      state.faq = text;
+      state.step = 'catalog';
+      state.catalog = [];
+      registrationState.set(sender, state);
+      await sock.sendMessage(sender, { text: 'Now, let’s build your catalog. Please *Send a Picture* of your product with a *Caption*.\n\nType *Done* when you are finished uploading.' });
+      break;
+
+    case 'catalog':
+      if (cleanText === 'done') {
+        if (state.catalog.length === 0) {
+            await sock.sendMessage(sender, { text: 'Please upload at least one product picture before typing Done.' });
+            return;
+        }
+        // Save to DB
+        const newVendor = new Vendor({
+          phoneNumber: sender,
+          businessName: state.businessName,
+          bankName: state.bankName,
+          bankCode: state.bankCode,
+          accountNumber: state.accountNumber,
+          accountName: state.accountName,
+          businessDescription: state.description,
+          faq: state.faq,
+          catalog: state.catalog,
+          isApproved: true
+        });
+        await newVendor.save();
+        registrationState.delete(sender);
+        await sock.sendMessage(sender, { text: `✅ *Onboarding Complete!*\n\nBusiness: ${state.businessName}\nAccount: ${state.accountName}\n\nYour profile is now active.` });
+      } else if (msg.message?.imageMessage) {
+        // Simple placeholder logic for image handling. 
+        // In production, you would upload this to Cloudinary/S3.
+        const caption = msg.message.imageMessage.caption || "Product Image";
+        state.catalog.push({ imageUrl: "stored_locally_or_cloud", caption });
+        registrationState.set(sender, state);
+        await sock.sendMessage(sender, { text: `✅ Added to catalog! Send another image or type *Done* to finish.` });
+      } else {
+        await sock.sendMessage(sender, { text: 'Please send an *Image* or type *Done*.' });
+      }
       break;
   }
 }
 
-async function getAIResponse(text, vendor) {
-  const prompt = `You are a jovial sales PA for ${vendor.businessName}. Tone: Helpful, Fun, Nigerian. Description: ${vendor.description}. If the customer wants to buy, calculate the amount and strictly respond with TRIGGER_PAYMENT:[amount].`;
-  const res = await openai.chat.completions.create({
-    model: "gpt-3.5-turbo", messages: [{ role: "system", content: prompt }, { role: "user", content: text }]
-  });
-  return res.choices[0].message.content;
-}
+startWhatsAppBot();
 
-function initSupabaseObserver(sock) {
-  supabase.channel('transactions').on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'transactions' }, async (payload) => {
-    if (payload.new.status === 'success') {
-      const tx = await Transaction.findOne({ txRef: payload.new.tx_ref, status: 'pending' });
-      if (tx) {
-        tx.status = 'success'; await tx.save();
-        await sock.sendMessage(tx.customerPhone, { text: "💰 *PAYMENT CONFIRMED!* Your order has been placed. Thank you for your purchase! 🥳✨" });
-      }
-    }
-  }).subscribe();
-}
-
-function startCatalogLoop(sock) {
-  setInterval(async () => {
-    const vendors = await Vendor.find({ isApproved: true });
-    for (const v of vendors) {
-      if (v.catalog.length > 0 && v.activeGroups.length > 0) {
-        const item = v.catalog[Math.floor(Math.random() * v.catalog.length)];
-        for (const g of v.activeGroups) {
-          await sock.sendMessage(g, { image: { url: item.imageUrl }, caption: `🔥 *Check this out from ${v.businessName}!* \n\nOnly ₦${item.price.toLocaleString()}` });
-        }
-      }
-    }
-  }, 8 * 60 * 60 * 1000);
-}
-
-startAgent();
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
