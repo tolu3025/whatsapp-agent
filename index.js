@@ -6,8 +6,7 @@ const {
   delay,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  jidNormalizedUser,
-  Browse
+  jidNormalizedUser 
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -19,7 +18,9 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.use(express.json());
 
-// ... (Database & Supabase setup remains exactly the same as your previous code) ...
+// ==========================================
+// 1. DATABASE & SUPABASE CONFIG
+// ==========================================
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -38,94 +39,124 @@ const Vendor = mongoose.model('Vendor', new mongoose.Schema({
 
 const registrationState = new Map();
 let hasRequestedCode = false;
+let sock; 
 
 // ==========================================
-// 2. WHATSAPP ENGINE (STABILITY & LINK FIX)
+// 2. KUKAPAY REALTIME LISTENER
+// ==========================================
+const initSupabase = () => {
+    const channel = supabase.channel('public:transactions');
+    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, async (payload) => {
+        const tx = payload.new;
+        if (tx.status === 'successful' && sock) {
+            const vendor = await Vendor.findOne({ phoneNumber: tx.vendor_id });
+            try {
+                await sock.sendMessage(tx.customer_jid, { 
+                    text: `✅ *PAYMENT CONFIRMED!*\n\nReference: ${tx.tx_ref}\nAmount: ₦${tx.amount}\n\n*${vendor?.businessName || 'The Vendor'}* has received your payment. Your order is now being processed! 🚚✨` 
+                });
+                if (vendor) await sock.sendMessage(vendor.phoneNumber, { text: `💰 *Cha-Ching!* Your Sales Agent just closed a ₦${tx.amount} deal with ${tx.customer_name}!` });
+            } catch (e) { console.log("Supabase message send failed."); }
+        }
+    }).subscribe();
+};
+
+// ==========================================
+// 3. FLUTTERWAVE V4 HELPERS
+// ==========================================
+let cachedToken = null;
+let tokenExpiry = 0;
+
+async function getFlwV4Token() {
+    if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
+    try {
+        const res = await axios.post('https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token', 
+            new URLSearchParams({
+                client_id: process.env.FLW_CLIENT_ID,
+                client_secret: process.env.FLW_CLIENT_SECRET,
+                grant_type: 'client_credentials'
+            }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
+        cachedToken = res.data.access_token;
+        tokenExpiry = Date.now() + (res.data.expires_in * 1000) - 60000;
+        return cachedToken;
+    } catch (e) { return null; }
+}
+
+async function verifyVendorV4(accountNumber, bankName) {
+    const token = await getFlwV4Token();
+    try {
+        const banks = await axios.get(`${process.env.FLW_BASE_URL}/banks/NG`, { headers: { Authorization: `Bearer ${token}` } });
+        const bank = banks.data.data.find(b => b.name.toLowerCase().includes(bankName.toLowerCase()));
+        if (!bank) return null;
+        const resolve = await axios.post(`${process.env.FLW_BASE_URL}/banks/account-resolve`, 
+            { account_number: accountNumber, account_bank: bank.code },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+        return { name: resolve.data.data.account_name, code: bank.code };
+    } catch (e) { return null; }
+}
+
+// ==========================================
+// 4. WHATSAPP ENGINE (PAIRING FIXED)
 // ==========================================
 async function startWhatsAppBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   const { version } = await fetchLatestBaileysVersion();
   
-  console.log(`📡 Connecting with WA v${version.join('.')}`);
-
-  const sock = makeWASocket({
+  sock = makeWASocket({
     version,
-    // Use fatal level to keep logs clean and reduce CPU usage during link
-    logger: pino({ level: 'fatal' }), 
+    logger: pino({ level: 'silent' }),
     auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })),
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    // BROSWER FIX: "Chrome" identity helps with pairing stability
+    // FIX: Standard Browser Array for Pairing Stability
     browser: ["Ubuntu", "Chrome", "121.0.6167.160"],
     
-    // --- ABSOLUTE STABILITY SETTINGS TO PREVENT 515 & PAIRING HANG ---
-    printQRInTerminal: false,
-    mobile: false, // Ensure we aren't identified as a mobile client
-    keepAliveIntervalMs: 30000,
+    // RENDER FIXES
+    syncFullHistory: false, 
+    fireInitQueries: false,
+    shouldSyncHistoryMessage: () => false, 
     connectTimeoutMs: 60000,
-    msgRetryCounterCache: undefined, // Don't retry old messages
-    maxMsgRetryCount: 1, 
-    syncFullHistory: false, // DO NOT sync old chats
-    fireInitQueries: false, // DO NOT fetch labels/contacts
-    shouldSyncHistoryMessage: () => false, // DO NOT sync any history
-    // -----------------------------------------------------------------
-
-    // Add a placeholder to prevent crashes on message upsert
-    getMessage: async (key) => { return { conversation: 'Message' } }
+    defaultQueryTimeoutMs: 0,
+    keepAliveIntervalMs: 10000,
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  // SUPABASE Transaction Listener (Kukapay)
-  supabase.channel('public:transactions')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, async (payload) => {
-        const tx = payload.new;
-        if (tx.status === 'successful') {
-            const vendor = await Vendor.findOne({ phoneNumber: tx.vendor_id });
-            await sock.sendMessage(tx.customer_jid, { text: `✅ *PAYMENT CONFIRMED!*\n\nThank you for shopping with *${vendor?.businessName}*. Your order is now processing! 🚚` });
-        }
-    }).subscribe();
-
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Logic for Pairing Code
+    // --- PAIRING CODE LOGIC ---
     if (!sock.authState.creds.registered && !hasRequestedCode) {
         hasRequestedCode = true;
         const pairingNumber = process.env.PAIRING_NUMBER;
         if (pairingNumber) {
-            console.log(`⏳ Getting pairing code for ${pairingNumber}...`);
-            await delay(10000); // 10 second delay allows socket to stabilize
+            console.log(`⏳ Stabilizing connection for ${pairingNumber}...`);
+            await delay(10000); // CRITICAL: Wait for socket to be ready
             try {
                 const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
                 console.log(`🔑 YOUR PAIRING CODE: ${code}`);
             } catch (e) {
-                console.error("❌ Pairing Error:", e.message);
-                hasRequestedCode = false;
+                console.error("Pairing Request Failed:", e.message);
+                hasRequestedCode = false; 
             }
         }
     }
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      console.log(`🔴 Connection closed (Reason: ${code})`);
-
-      // If it's a stream error or timeout, restart immediately
-      if (code === 515 || code === 408 || code === DisconnectReason.connectionLost) {
-        setTimeout(startWhatsAppBot, 5000);
-      } 
-      // If linking was rejected, clear session
-      else if (code === 401 || code === DisconnectReason.loggedOut) {
-        console.log("🧹 Clearing session and retrying...");
+      hasRequestedCode = false; // Reset so code can be requested on restart
+      
+      if (code === 515 || code === 401 || code === DisconnectReason.loggedOut) {
+        console.log("🧹 Clearing session for fresh retry...");
         if (fs.existsSync('./auth_session')) fs.rmSync('./auth_session', { recursive: true, force: true });
-        hasRequestedCode = false;
         setTimeout(startWhatsAppBot, 5000);
       } else {
         setTimeout(startWhatsAppBot, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 SUCCESS: AI Sales Agent is Linked and Online!');
+      console.log('🟢 SUCCESS: Sales Agent Online!');
       hasRequestedCode = false;
     }
   });
@@ -139,20 +170,93 @@ async function startWhatsAppBot() {
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
     const cleanInput = text.toLowerCase();
 
-    // Check if Live Vendor for AI Sales Mode
     const liveVendor = await Vendor.findOne({ isLive: true }); 
     if (liveVendor && !registrationState.has(sender) && !['register', 'onboard'].includes(cleanInput)) {
-        return handleSalesAI(sock, sender, text, liveVendor);
+        return handleSalesAI(sender, text, liveVendor);
     }
 
-    // Onboarding Mode
     if (registrationState.has(sender) || ['register', 'onboard'].includes(cleanInput)) {
-        return handleVendorOnboarding(sock, sender, msg);
+        return handleVendorOnboarding(sender, msg);
     }
   });
 }
 
-// ... (handleSalesAI and handleVendorOnboarding remain exactly the same) ...
+// ==========================================
+// 5. AGENT HELPERS
+// ==========================================
+async function handleSalesAI(customerJid, text, vendor) {
+    const input = text.toLowerCase();
+    if (input.includes('price') || input.includes('catalog')) {
+        const items = vendor.catalog.map(i => `🛍️ *${i.caption}*\n💰 ₦${i.price.toLocaleString()}\n`).join('\n');
+        await sock.sendMessage(customerJid, { text: `You have great taste! 😍 Here's what *${vendor.businessName}* has:\n\n${items}` });
+    } else if (input.includes('buy') || input.match(/\d+/)) {
+        try {
+            const res = await axios.post('https://api.flutterwave.com/v3/payments', {
+                tx_ref: `KUKA-${Date.now()}`, amount: "5000", currency: "NGN", 
+                customer: { email: "customer@kuka.ai" }, customizations: { title: vendor.businessName }
+            }, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
+            await sock.sendMessage(customerJid, { text: `Secure checkout link: ${res.data.data.link}` });
+        } catch (e) { await sock.sendMessage(customerJid, { text: "Glitch! Try 'buy' again." }); }
+    } else {
+        await sock.sendMessage(customerJid, { text: `Hello! 🌟 Welcome to *${vendor.businessName}*. Ask for our prices to start!` });
+    }
+}
 
+async function handleVendorOnboarding(sender, msg) {
+    if (!registrationState.has(sender)) {
+        registrationState.set(sender, { step: 'name' });
+        return sock.sendMessage(sender, { text: "Hello Vendor! 👋 Business Name?" });
+    }
+    const state = registrationState.get(sender);
+    const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
+
+    switch (state.step) {
+        case 'name':
+            state.businessName = text; state.step = 'bank';
+            await sock.sendMessage(sender, { text: "Bank Name?" });
+            break;
+        case 'bank':
+            state.bankName = text; state.step = 'account';
+            await sock.sendMessage(sender, { text: "Account Number?" });
+            break;
+        case 'account':
+            const v = await verifyVendorV4(text, state.bankName);
+            if (!v) { state.step = 'bank'; return sock.sendMessage(sender, { text: "Verification failed. Bank Name?" }); }
+            state.accountName = v.name; state.accountNumber = text; state.step = 'confirm';
+            await sock.sendMessage(sender, { text: `Is this you: *${v.name}*?` });
+            break;
+        case 'confirm':
+            if (text.toLowerCase() === 'yes') { state.step = 'desc'; await sock.sendMessage(sender, { text: "Business Description?" }); }
+            else { state.step = 'bank'; await sock.sendMessage(sender, { text: "Bank Name?" }); }
+            break;
+        case 'desc':
+            state.description = text; state.step = 'faq';
+            await sock.sendMessage(sender, { text: "FAQ?" });
+            break;
+        case 'faq':
+            state.faq = text; state.step = 'catalog'; state.catalog = [];
+            await sock.sendMessage(sender, { text: "Catalog Photos + Prices. Type Done." });
+            break;
+        case 'catalog':
+            if (text.toLowerCase() === 'done') {
+                const newVendor = new Vendor({ ...state, phoneNumber: sender, isLive: true });
+                await newVendor.save(); registrationState.delete(sender);
+                await sock.sendMessage(sender, { text: "🎉 Live!" });
+            } else if (msg.message?.imageMessage) {
+                const cap = msg.message.imageMessage.caption || "";
+                state.catalog.push({ imageUrl: "received", caption: cap, price: parseInt(cap.match(/\d+/)?.[0]) || 0 });
+                await sock.sendMessage(sender, { text: "✅ Added! Next or Done." });
+            }
+            break;
+    }
+    registrationState.set(sender, state);
+}
+
+// ==========================================
+// 6. INIT
+// ==========================================
+initSupabase(); 
 startWhatsAppBot();
-app.listen(process.env.PORT || 10000);
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Running on ${PORT}`));
