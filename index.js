@@ -12,18 +12,18 @@ const pino = require('pino');
 const mongoose = require('mongoose');
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require('openai');
-const axios = require('axios');
+const fs = require('fs');
 const express = require('express');
 
 const app = express();
 app.use(express.json());
 
 // ==========================================
-// 1. START SERVER IMMEDIATELY (For Render)
+// 1. RENDER HEALTH CHECK (START FIRST)
 // ==========================================
 const PORT = process.env.PORT || 10000;
-app.get('/', (req, res) => res.send('Agent is Running'));
-app.listen(PORT, () => console.log(`🚀 Server listening on port ${PORT}`));
+app.get('/', (req, res) => res.send('PA Agent Active'));
+app.listen(PORT, () => console.log(`🚀 Health check live on port ${PORT}`));
 
 // ==========================================
 // 2. DATABASE & SERVICES
@@ -32,23 +32,25 @@ mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB C
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const Vendor = mongoose.model('Vendor', new mongoose.Schema({
-  phoneNumber: { type: String, required: true, unique: true },
-  businessName: String, bankCode: String, accountNumber: String,
-  flwSubaccountId: String, isApproved: { type: Boolean, default: false },
-  onboardingStep: { type: String, default: 'none' }
-}));
-
 // ==========================================
-// 3. WHATSAPP ENGINE (ANTI-LOOP VERSION)
+// 3. WHATSAPP BOT (ANTI-405 VERSION)
 // ==========================================
-let pairingLocked = false; 
+let pairingLocked = false;
 
 async function startWhatsAppBot() {
+  console.log('📡 Initializing WhatsApp Connection...');
+
+  // 405 FIX: Try to get latest version, but fallback to a known high version
+  let version = [2, 3000, 1017578213]; 
+  try {
+    const { version: latest } = await fetchLatestBaileysVersion();
+    version = latest;
+    console.log(`✅ Using Protocol Version: ${version.join('.')}`);
+  } catch (e) {
+    console.log(`⚠️ Fetch failed, using hardcoded version: ${version.join('.')}`);
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
-  
-  // Use a stable, high version to bypass 405 error
-  const version = [2, 3000, 1017578213]; 
 
   const sock = makeWASocket({
     version,
@@ -57,11 +59,13 @@ async function startWhatsAppBot() {
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
     logger: pino({ level: 'silent' }),
-    browser: ['Ubuntu', 'Chrome', '110.0.5481.177'],
-    syncFullHistory: false, // CRITICAL: Stops 515 error
-    shouldSyncHistoryMessage: () => false, // CRITICAL: Stops history lag
-    linkPreviewImageThumbnailWidth: 192,
-    markOnlineOnConnect: true,
+    // 405 FIX: Use a very specific modern browser string
+    browser: ['Ubuntu', 'Chrome', '121.0.6167.85'], 
+    syncFullHistory: false,
+    shouldSyncHistoryMessage: () => false,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 0,
+    keepAliveIntervalMs: 10000,
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -69,37 +73,37 @@ async function startWhatsAppBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Pairing logic with lock to prevent the "Multiple Code" loop
     if (qr && !sock.authState.creds.registered && !pairingLocked) {
       pairingLocked = true;
       const pairingNumber = process.env.PAIRING_NUMBER;
       if (pairingNumber) {
-        console.log(`⏳ Requesting code for ${pairingNumber}...`);
-        await delay(7000);
+        await delay(10000);
         try {
           const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
           console.log(`🔑 YOUR PAIRING CODE: ${code}`);
-        } catch (e) {
-          console.log("Pairing failed, will retry in 2 mins...");
-          pairingLocked = false;
-        }
-        // Unlock after 2 minutes to allow a retry if you missed it
+        } catch (e) { pairingLocked = false; }
         setTimeout(() => { pairingLocked = false; }, 120000);
       }
     }
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      console.log(`🔴 Connection Lost (${statusCode}).`);
-      
-      if (statusCode === 401) {
-          console.log("❌ Logged out or Session expired. Delete 'auth_session' folder.");
-      } else if (statusCode !== DisconnectReason.loggedOut) {
-          console.log("🔄 Reconnecting in 5s...");
-          setTimeout(startWhatsAppBot, 5000);
+      console.log(`🔴 Connection Lost. Status: ${statusCode}`);
+
+      // 405 EMERGENCY RESET LOGIC
+      if (statusCode === 405 || statusCode === 401) {
+        console.log('🧹 405/Corrupt Session detected. Wiping auth_session and restarting...');
+        if (fs.existsSync('./auth_session')) {
+          fs.rmSync('./auth_session', { recursive: true, force: true });
+        }
+        setTimeout(startWhatsAppBot, 5000);
+      } 
+      else if (statusCode !== DisconnectReason.loggedOut) {
+        console.log('🔄 Attempting standard reconnect...');
+        setTimeout(startWhatsAppBot, 8000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 AGENT ONLINE: Standing by for messages...');
+      console.log('🟢 SUCCESS: AGENT IS ONLINE!');
       pairingLocked = false;
     }
   });
@@ -112,11 +116,11 @@ async function startWhatsAppBot() {
     const sender = jidNormalizedUser(msg.key.remoteJid);
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").toLowerCase().trim();
 
-    console.log(`📩 Message from [${sender}]: ${text}`);
-
-    // ... (Your AI/Registration logic from previous versions goes here) ...
-    if (text.includes("i want to register")) {
-        await sock.sendMessage(sender, { text: "👋 I'm your new Sales PA! What is your *Business Name*?" });
+    console.log(`📩 [${sender}]: ${text}`);
+    
+    // Test response to confirm scanning is working
+    if (text.includes("test")) {
+        await sock.sendMessage(sender, { text: "✅ Agent is active and scanning!" });
     }
   });
 }
