@@ -230,35 +230,35 @@ async function startWhatsAppBot() {
     auth: state,
     printQRInTerminal: false, 
     logger: pino({ level: 'silent' }),
-    // Explicitly identify as standard desktop Chrome to avoid connection handshaking drops
+    // Use Ubuntu Chrome standard identity
     browser: Browsers.ubuntu('Chrome')
   });
 
-  // Pairing Logic Activation with safety buffer to completely prevent 428 Precondition Required
-  if (!sock.authState.creds.registered) {
-    const pairingNumber = process.env.PAIRING_NUMBER; 
-    if (pairingNumber) {
-      // 10-second delay allows the WebSocket connection to finish full authentication handshakes
-      await delay(10000); 
-      try {
-        console.log(`⏳ Requesting pairing code for ${pairingNumber}...`);
-        const code = await sock.requestPairingCode(pairingNumber.trim());
-        console.log(`🔑 ================================================`);
-        console.log(`🔑 ENTER THIS WHATSAPP PAIRING CODE: ${code}`);
-        console.log(`🔑 ================================================`);
-      } catch (err) {
-        console.error('🔴 Error generating WhatsApp Pairing Code:', err.message || err);
-      }
-    } else {
-      console.log('⚠️ PAIRING_NUMBER environment variable is missing. Add it to utilize pairing codes.');
-    }
-  }
-
   sock.ev.on('creds.update', saveCreds);
 
-  // Connection Update Handler with 10-second spam safety delay
+  // Connection State Update and QR/Pairing Logic
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, lastDisconnect, qr } = update;
+
+    // Trigger pairing code ONLY when the socket successfully handshakes (emits the 'qr' state)
+    if (qr && !sock.authState.creds.registered) {
+      const pairingNumber = process.env.PAIRING_NUMBER;
+      if (pairingNumber) {
+        try {
+          console.log(`⏳ Handshake successful. Generating pairing code for ${pairingNumber}...`);
+          await delay(1500); // 1.5-second buffer to ensure raw socket registration is complete
+          const code = await sock.requestPairingCode(pairingNumber.trim());
+          console.log(`🔑 ================================================`);
+          console.log(`🔑 ENTER THIS WHATSAPP PAIRING CODE: ${code}`);
+          console.log(`🔑 ================================================`);
+        } catch (err) {
+          console.error('🔴 Error generating WhatsApp Pairing Code:', err.message || err);
+        }
+      } else {
+        console.log('⚠️ PAIRING_NUMBER environment variable is missing.');
+      }
+    }
+
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log('🔴 Connection closed. Reconnecting...', shouldReconnect);
