@@ -19,7 +19,7 @@ const app = express();
 app.use(express.json());
 
 // ==========================================
-// 1. DATABASE & SUPABASE (KUKAPAY SHARED)
+// 1. DATABASE & SUPABASE (KUKAPAY)
 // ==========================================
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -65,14 +65,12 @@ async function getFlwV4Token() {
 async function verifyVendorV4(accountNumber, bankName) {
     const token = await getFlwV4Token();
     try {
-        // Get Bank Code
         const banks = await axios.get(`${process.env.FLW_BASE_URL}/banks/NG`, {
             headers: { Authorization: `Bearer ${token}` }
         });
         const bank = banks.data.data.find(b => b.name.toLowerCase().includes(bankName.toLowerCase()));
         if (!bank) return null;
 
-        // Resolve Account
         const resolve = await axios.post(`${process.env.FLW_BASE_URL}/banks/account-resolve`, 
             { account_number: accountNumber, account_bank: bank.code },
             { headers: { Authorization: `Bearer ${token}` } }
@@ -82,7 +80,7 @@ async function verifyVendorV4(accountNumber, bankName) {
 }
 
 // ==========================================
-// 3. WHATSAPP ENGINE (RENDER STABILITY FIX)
+// 3. WHATSAPP ENGINE (START AFRESH CONFIG)
 // ==========================================
 async function startWhatsAppBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
@@ -90,53 +88,70 @@ async function startWhatsAppBot() {
   
   const sock = makeWASocket({
     version,
-    logger: pino({ level: 'error' }),
+    logger: pino({ level: 'silent' }), // High silence to save CPU on Render
     auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    browser: ["Ubuntu", "Chrome", "120.0.6099.129"],
+    browser: ["Ubuntu", "Chrome", "121.0.6167.160"],
     
-    // --- RENDER FIX: NO HISTORY READING / NO 515 ERRORS ---
-    syncFullHistory: false, 
-    fireInitQueries: false,
-    shouldSyncHistoryMessage: () => false, 
-    connectTimeoutMs: 120000,
+    // --- START AFRESH / NO PREVIOUS MESSAGES SETTINGS ---
+    syncFullHistory: false,             // Do not sync old chats
+    fireInitQueries: false,             // Do not fetch contacts/labels
+    shouldSyncHistoryMessage: () => false, // Kill history sync immediately
+    markOnlineOnConnect: true,
+    linkPreviewHighQuality: false,
+    generateHighQualityLinkPreview: false,
+    // ---------------------------------------------------
+    
+    connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 0,
-    // ------------------------------------------------------
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  // --- SUPABASE REALTIME: KUKAPAY WEBHOOK LISTENER ---
+  // SUPABASE Transaction Monitor
   supabase.channel('public:transactions')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, async (payload) => {
         const tx = payload.new;
         if (tx.status === 'successful') {
             const vendor = await Vendor.findOne({ phoneNumber: tx.vendor_id });
-            // Send receipt to customer
             await sock.sendMessage(tx.customer_jid, { 
-                text: `✅ *PAYMENT RECEIVED!*\n\nReference: ${tx.tx_ref}\nAmount: ₦${tx.amount}\n\nThank you for shopping with *${vendor?.businessName || 'us'}*. Your order is now being processed for delivery! 🚚✨` 
+                text: `✅ *ORDER CONFIRMED!*\n\nReference: ${tx.tx_ref}\nAmount: ₦${tx.amount}\n\n*${vendor?.businessName}* is now preparing your order. Thanks for choosing us! 🥳` 
             });
-            // Notify Vendor
-            if (vendor) await sock.sendMessage(vendor.phoneNumber, { text: `💰 *Cha-Ching!* You just closed a deal. ₦${tx.amount} received from ${tx.customer_name}.` });
+            if (vendor) await sock.sendMessage(vendor.phoneNumber, { text: `💰 *Alert:* Your AI Sales Agent just closed a ₦${tx.amount} deal!` });
         }
     }).subscribe();
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
+
     if (qr && !sock.authState.creds.registered && !hasRequestedCode) {
         hasRequestedCode = true;
         const pairingNumber = process.env.PAIRING_NUMBER;
         if (pairingNumber) {
-            await delay(10000);
+            await delay(8000);
             const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
-            console.log(`🔑 PAIRING CODE: ${code}`);
+            console.log(`🔑 YOUR PAIRING CODE: ${code}`);
         }
     }
-    if (connection === 'open') {
-        console.log('🟢 SUCCESS: AI Sales Agent is Live!');
+
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode;
+      console.log(`🔴 Connection closed. Code: ${code}`);
+
+      // If we get a 515 or 401, wipe the session folder to start afresh
+      if (code === 515 || code === 401 || code === DisconnectReason.loggedOut) {
+        console.log("🧹 Wiping auth_session to fix the 515 hang...");
+        if (fs.existsSync('./auth_session')) fs.rmSync('./auth_session', { recursive: true, force: true });
         hasRequestedCode = false;
+        setTimeout(startWhatsAppBot, 5000);
+      } else {
+        setTimeout(startWhatsAppBot, 10000);
+      }
+    } else if (connection === 'open') {
+      console.log('🟢 SUCCESS: Sales Agent Online (No History Synced)');
+      hasRequestedCode = false;
     }
   });
 
@@ -149,65 +164,59 @@ async function startWhatsAppBot() {
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
     const cleanInput = text.toLowerCase();
 
-    // 1. Check if the sender is a registered LIVE VENDOR (Customer is messaging them)
-    // In this multi-vendor setup, we check if the recipient of the message is a vendor
-    // or if the sender is interacting with a vendor instance.
-    const liveVendor = await Vendor.findOne({ isLive: true }); // Simplified for single-instance bot
-
+    // AI SALES MODE (For live vendors)
+    const liveVendor = await Vendor.findOne({ isLive: true }); 
     if (liveVendor && !registrationState.has(sender) && !['register', 'onboard'].includes(cleanInput)) {
         return handleSalesAI(sock, sender, text, liveVendor);
     }
 
-    // 2. Onboarding Flow for new Vendors
-    if (registrationState.has(sender) || ['register', 'i want to register', 'onboard'].includes(cleanInput)) {
+    // ONBOARDING MODE
+    if (registrationState.has(sender) || ['register', 'onboard'].includes(cleanInput)) {
         return handleVendorOnboarding(sock, sender, msg);
     }
   });
 }
 
 // ==========================================
-// 4. SALES AI: THE NEGOTIATOR
+// 4. SALES AI (PROFESSIONAL & JOVIAL)
 // ==========================================
 async function handleSalesAI(sock, customerJid, text, vendor) {
     const input = text.toLowerCase();
     
-    // Professional & Jovial Personality Logic
-    if (input.includes('hello') || input.includes('hi')) {
-        await sock.sendMessage(customerJid, { text: `Hey there! 😊 Welcome to *${vendor.businessName}*. I'm your dedicated assistant here to help you find the best deals. What can I get for you today?` });
+    // Personality: Friendly, Sales-focused, Emojis
+    if (input.includes('price') || input.includes('catalog') || input.includes('how much')) {
+        const items = vendor.catalog.map(i => `✨ *${i.caption}*\n💵 ₦${i.price.toLocaleString()}\n`).join('\n');
+        await sock.sendMessage(customerJid, { text: `Omo! You have great taste! 😍 Here's what we have available right now at *${vendor.businessName}*:\n\n${items}\nWhich one should I pack for you? 🛍️` });
     } 
-    else if (input.includes('price') || input.includes('catalog') || input.includes('list')) {
-        const items = vendor.catalog.map(i => `🛍️ *${i.caption}*\n💰 Price: ₦${i.price.toLocaleString()}\n`).join('\n');
-        await sock.sendMessage(customerJid, { text: `We've got some amazing stuff! Check these out:\n\n${items}\n\nWhich one catches your eye? 😍` });
-    }
     else if (input.includes('buy') || input.includes('order') || input.match(/\d+/)) {
-        // Generate dynamic Flutterwave link (Using v3 for payment links as it is standard)
+        // Generate Link via Flutterwave (Payment Links use v3 keys usually)
         try {
             const ref = `KUKA-${Date.now()}`;
             const res = await axios.post('https://api.flutterwave.com/v3/payments', {
-                tx_ref: ref, amount: "5000", currency: "NGN", // Demo amount
-                customer: { email: "customer@kukai.ai", name: "WhatsApp Customer" },
-                customizations: { title: vendor.businessName }
+                tx_ref: ref, amount: "5000", currency: "NGN", 
+                customer: { email: "customer@mail.com", name: "WhatsApp Buyer" },
+                customizations: { title: vendor.businessName, description: "Kukapay Payment" }
             }, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
-            
+
             await sock.sendMessage(customerJid, { 
-                text: `Awesome choice! 🚀 Let's wrap this up. You can make payment securely here:\n\n${res.data.data.link}\n\nI'll be right here waiting to send your receipt once it's done! ✅` 
+                text: `Let's get this deal closed! 🚀 You can pay securely via this link:\n\n${res.data.data.link}\n\nI'll be notified immediately you pay and I'll send your receipt! ✅` 
             });
         } catch (e) {
-            await sock.sendMessage(customerJid, { text: "Oops! I had a slight hiccup generating your payment link. Can you try again in a second? 🙏" });
+            await sock.sendMessage(customerJid, { text: "My apologies! I had a little glitch getting the payment link. Could you try saying 'buy' again? 🙏" });
         }
     }
     else {
-        await sock.sendMessage(customerJid, { text: `I love that energy! ✨ Tell me more about what you're looking for, or ask about our delivery process!` });
+        await sock.sendMessage(customerJid, { text: `Welcome to *${vendor.businessName}*! 🌟 I'm here to make your shopping experience smooth and fun. \n\nAbout us: ${vendor.businessDescription}\n\nAsk me for our price list to get started! 😊` });
     }
 }
 
 // ==========================================
-// 5. VENDOR ONBOARDING FLOW
+// 5. VENDOR ONBOARDING (TASKS)
 // ==========================================
 async function handleVendorOnboarding(sock, sender, msg) {
     if (!registrationState.has(sender)) {
         registrationState.set(sender, { step: 'name' });
-        return sock.sendMessage(sender, { text: "Hello Vendor! 👋 Let's set up your AI Sales Agent. What is your *Business Name*?" });
+        return sock.sendMessage(sender, { text: "Hello Vendor! 👋 Let's set up your AI Agent. What is your *Business Name*?" });
     }
 
     const state = registrationState.get(sender);
@@ -217,45 +226,40 @@ async function handleVendorOnboarding(sock, sender, msg) {
         case 'name':
             state.businessName = text;
             state.step = 'bank';
-            await sock.sendMessage(sender, { text: `Nice one, *${text}*! Now, what is your *Bank Name*?` });
+            await sock.sendMessage(sender, { text: `Got it! Now, what is your *Bank Name*?` });
             break;
         case 'bank':
             state.bankName = text;
             state.step = 'account';
-            await sock.sendMessage(sender, { text: "And your *10-digit Account Number*?" });
+            await sock.sendMessage(sender, { text: "Your *10-digit Account Number*?" });
             break;
         case 'account':
-            await sock.sendMessage(sender, { text: "🔍 *AI is verifying your account via Flutterwave v4...*" });
+            await sock.sendMessage(sender, { text: "🔍 *Verifying via Flutterwave v4...*" });
             const v = await verifyVendorV4(text, state.bankName);
             if (!v) {
                 state.step = 'bank';
-                return sock.sendMessage(sender, { text: "❌ Verification failed. Please re-type your *Bank Name* correctly:" });
+                return sock.sendMessage(sender, { text: "❌ Verification failed. Check the details and re-type your *Bank Name*:" });
             }
-            state.accountName = v.name;
-            state.accountNumber = text;
-            state.bankCode = v.code;
+            state.accountName = v.name; state.accountNumber = text; state.bankCode = v.code;
             state.step = 'confirm';
-            await sock.sendMessage(sender, { text: `I found this account: *${v.name}*\n\nIs this correct? (Yes/No)` });
+            await sock.sendMessage(sender, { text: `Is this your account: *${v.name}*? (Yes/No)` });
             break;
         case 'confirm':
             if (text.toLowerCase() === 'yes') {
                 state.step = 'desc';
-                await sock.sendMessage(sender, { text: "Verified! ✅ Now the fun part. Give me a *Business Description* for the AI to use:" });
+                await sock.sendMessage(sender, { text: "Great! Verified. ✅ Now provide your *Business Description* (What do you sell?):" });
             } else {
                 state.step = 'bank';
                 await sock.sendMessage(sender, { text: "Let's try again. What is your *Bank Name*?" });
             }
             break;
         case 'desc':
-            state.description = text;
-            state.step = 'faq';
-            await sock.sendMessage(sender, { text: "Next Task: Provide a common *FAQ* (e.g. Question & Answer):" });
+            state.description = text; state.step = 'faq';
+            await sock.sendMessage(sender, { text: "Provide your *FAQ* (e.g. Do you deliver? Yes):" });
             break;
         case 'faq':
-            state.faq = text;
-            state.step = 'catalog';
-            state.catalog = [];
-            await sock.sendMessage(sender, { text: "Final Task: *Upload Catalog Photos*. Include the *Price* in the caption!\n\nType *Done* when you're finished." });
+            state.faq = text; state.step = 'catalog'; state.catalog = [];
+            await sock.sendMessage(sender, { text: "Final Task: *Send Catalog Photos* with the *Price* in the caption. Type *Done* when finished." });
             break;
         case 'catalog':
             if (text.toLowerCase() === 'done') {
@@ -267,12 +271,12 @@ async function handleVendorOnboarding(sock, sender, msg) {
                 });
                 await newVendor.save();
                 registrationState.delete(sender);
-                await sock.sendMessage(sender, { text: "🎉 *CONGRATULATIONS!* Your AI Sales Agent is now active. I will handle your customers, negotiate deals, and manage payments via Kukapay!" });
+                await sock.sendMessage(sender, { text: "🎉 *YOU ARE LIVE!* I will now attend to your customers, negotiate deals, and handle payments via Kukapay." });
             } else if (msg.message?.imageMessage) {
                 const cap = msg.message.imageMessage.caption || "";
                 const price = parseInt(cap.match(/\d+/)?.[0]) || 0;
-                state.catalog.push({ imageUrl: "internal", caption: cap, price });
-                await sock.sendMessage(sender, { text: "✅ Added! Send more or type *Done*." });
+                state.catalog.push({ imageUrl: "received", caption: cap, price });
+                await sock.sendMessage(sender, { text: "✅ Added! Send another or type *Done*." });
             }
             break;
     }
