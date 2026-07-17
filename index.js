@@ -9,7 +9,7 @@ const {
   DisconnectReason, 
   Browsers,
   delay,
-  fetchLatestBaileysVersion // ⚡ CRITICAL: Imported to resolve the 405 error
+  fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -224,11 +224,14 @@ const REGISTRATION_TRIGGERS = [
   'want to onboard'
 ];
 
+// Tracking to prevent pairing loop spam
+let hasRequestedCode = false;
+
 async function startWhatsAppBot() {
   console.log('🚀 Initializing WhatsApp connection...');
 
-  // 1. Fetch the absolute latest WhatsApp version dynamically to bypass the 405 error
-  let version = [2, 3000, 1017578213]; // Default fallback safe version
+  // Fetch the absolute latest WhatsApp version dynamically to bypass the 405 error
+  let version = [2, 3000, 1017578213]; 
   try {
     const { version: latestVersion } = await fetchLatestBaileysVersion();
     version = latestVersion;
@@ -237,15 +240,15 @@ async function startWhatsAppBot() {
     console.warn('⚠️ Could not fetch latest WA version dynamically, using fallback version.', err.message);
   }
 
-  // Always initialize auth state
+  // Initialize auth state
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   
   const sock = makeWASocket({
-    version, // ⚡ PASS DYNAMIC VERSION HERE
+    version,
     auth: state,
-    printQRInTerminal: false, 
+    printQRInTerminal: false, // Must be false for pairing code usage
     logger: pino({ level: 'silent' }),
-    browser: Browsers.macOS('Desktop'), // macOS spoofing for desktop pairing consistency
+    browser: Browsers.macOS('Desktop'), 
     connectTimeoutMs: 60000,       
     keepAliveIntervalMs: 30000,    
     defaultQueryTimeoutMs: 60000,  
@@ -253,25 +256,28 @@ async function startWhatsAppBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Connection State Update and QR/Pairing Logic
+  // Connection State Update
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Trigger pairing code ONLY when the socket successfully handshakes
-    if (qr && !sock.authState.creds.registered) {
+    // Trigger pairing code generation only if qr event fires, we are not registered, and haven't requested yet
+    if (qr && !sock.authState.creds.registered && !hasRequestedCode) {
+      hasRequestedCode = true; // Lock immediately to prevent concurrent loops
       const pairingNumber = process.env.PAIRING_NUMBER;
+      
       if (pairingNumber) {
-        // Clean up formatting to prevent E.164 parsing errors
         const cleanNumber = pairingNumber.replace(/[^0-9]/g, '');
         try {
           console.log(`⏳ Handshake successful. Generating pairing code for +${cleanNumber}...`);
-          await delay(3000); // 3-second buffer for Render environment latency
+          // Adding a 5-second buffer delay to ensure socket channels are completely ready
+          await delay(5000); 
           const code = await sock.requestPairingCode(cleanNumber);
           console.log(`🔑 ================================================`);
           console.log(`🔑 ENTER THIS WHATSAPP PAIRING CODE: ${code}`);
           console.log(`🔑 ================================================`);
         } catch (err) {
           console.error('🔴 Error generating WhatsApp Pairing Code:', err.message || err);
+          hasRequestedCode = false; // Release lock so it can retry on a clean refresh
         }
       } else {
         console.log('⚠️ PAIRING_NUMBER environment variable is missing.');
@@ -284,6 +290,9 @@ async function startWhatsAppBot() {
       
       console.log(`🔴 Connection closed. Status Code: ${statusCode}. Reconnecting: ${shouldReconnect}`);
       
+      // Reset the lock when connection closes so it can pair again on restart if needed
+      hasRequestedCode = false;
+
       if (shouldReconnect) {
         console.log('⏳ Waiting 10 seconds before attempting reconnection to prevent log spam...');
         setTimeout(() => {
@@ -292,6 +301,7 @@ async function startWhatsAppBot() {
       }
     } else if (connection === 'open') {
       console.log('🟢 WhatsApp Connection successfully opened!');
+      hasRequestedCode = false; // Reset lock on successful link
     }
   });
 
