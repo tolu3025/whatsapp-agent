@@ -7,7 +7,6 @@ const {
   default: makeWASocket, 
   useMultiFileAuthState, 
   DisconnectReason, 
-  Browsers,
   delay,
   fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
@@ -61,7 +60,7 @@ const Vendor = mongoose.model('Vendor', VendorSchema);
 const Group = mongoose.model('Group', GroupSchema);
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 
-// Supabase Client Setup (Initialized safely after environment validation)
+// Supabase Client Setup
 const supabase = createClient(
   process.env.SUPABASE_URL, 
   process.env.SUPABASE_SERVICE_KEY
@@ -208,9 +207,9 @@ async function verifyAccountNumber(accountNumber, bankCode) {
   }
 }
 
-// ==========================================
-// 4. WHATSAPP BOT ENGINE (BAILEYS V7 RC)
-// ==========================================
+// ====================================================================
+// 4. WHATSAPP BOT ENGINE (DESKTOP CHROME / KUKATAI-AGENT MATCHED)
+// ====================================================================
 const registrationState = new Map();
 
 const REGISTRATION_TRIGGERS = [
@@ -248,7 +247,14 @@ async function startWhatsAppBot() {
     auth: state,
     printQRInTerminal: false, // Must be false for pairing code usage
     logger: pino({ level: 'silent' }),
-    browser: Browsers.macOS('Desktop'), 
+    
+    // =====================================================================
+    // 🖥️ PERFECT OS & USER AGENT PAIRING FINGERPRINT 
+    // =====================================================================
+    // Matches the "Google Chrome (Mac OS)" and "kukatai-agent" identity exactly!
+    browser: ['Mac OS', 'Chrome', '10.0.0'], 
+    name: 'kukatai-agent',
+
     connectTimeoutMs: 60000,       
     keepAliveIntervalMs: 30000,    
     defaultQueryTimeoutMs: 60000,  
@@ -293,8 +299,14 @@ async function startWhatsAppBot() {
       // Reset the lock when connection closes so it can pair again on restart if needed
       hasRequestedCode = false;
 
-      if (shouldReconnect) {
-        console.log('⏳ Waiting 10 seconds before attempting reconnection to prevent log spam...');
+      // ====================================================================
+      // ⚡ IMMEDIATE 515/RESTART RECONNECT (CRITICAL FOR FINALIZING PAIRS)
+      // ====================================================================
+      if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
+        console.log('⚡ Immediate restart payload received. finalising paired state securely now...');
+        startWhatsAppBot();
+      } else if (shouldReconnect) {
+        console.log('⏳ Waiting 10 seconds before attempting reconnection...');
         setTimeout(() => {
           startWhatsAppBot();
         }, 10000);
