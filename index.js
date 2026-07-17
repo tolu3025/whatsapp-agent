@@ -1,60 +1,62 @@
+// index.js - The entry point
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
 require('dotenv').config();
 
+// --- 1. Database Connection (Modular) ---
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log("Connected to MongoDB"))
+    .catch(err => console.error("DB Connection Error:", err));
+
+// --- 2. Express Server (For Health Checks) ---
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.status(200).json({ status: "Active" }));
+app.get('/health', (req, res) => res.status(200).send('OK'));
 app.listen(process.env.PORT || 10000);
 
-const AUTH_DIR = process.env.RENDER_DISK_PATH ? path.join(process.env.RENDER_DISK_PATH, 'auth_info_baileys') : 'auth_info_baileys';
-if (!fs.existsSync(AUTH_DIR)) {
-    try { fs.mkdirSync(AUTH_DIR, { recursive: true }); } catch (e) { console.error("Auth dir error", e); }
-}
+// --- 3. Persistent Authentication ---
+// Use RENDER_DISK_PATH for Render persistent storage
+const authPath = process.env.RENDER_DISK_PATH || './auth_info_baileys';
 
-async function startKukaTai() {
-    try {
-        await mongoose.connect(process.env.MONGODB_URI);
-        console.log("Connected to MongoDB");
-        
-        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-        const { version } = await fetchLatestBaileysVersion();
-        
-        const sock = makeWASocket({ 
-            auth: state, 
-            version, 
-            logger: pino({ level: 'silent' }), 
-            browser: ['KukaTai', 'Chrome', '1.0.0'] 
-        });
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState(authPath);
+    
+    const sock = makeWASocket({ 
+        auth: state, 
+        logger: pino({ level: 'silent' }),
+        browser: ['KukaTai-Scale', 'Chrome', '1.0.0'] 
+    });
 
-        sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', saveCreds);
 
-        if (process.env.BOT_PHONE_NUMBER && !sock.authState.creds.registered) {
-            setTimeout(async () => {
-                try {
-                    const code = await sock.requestPairingCode(process.env.BOT_PHONE_NUMBER.replace(/[^0-9]/g, ''));
-                    console.log("PAIRING CODE:", code);
-                } catch (e) { console.error("Pairing error:", e.message); }
-            }, 5000);
+    // --- 4. Event Handling (The "Engine") ---
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
+
+        try {
+            await handleIncomingMessage(sock, msg);
+        } catch (err) {
+            console.error("Message Handler Error:", err);
         }
+    });
 
-        sock.ev.on('connection.update', (update) => {
-            if (update.connection === 'close') {
-                if (update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-                    startKukaTai();
-                }
-            }
-        });
-
-    } catch (err) {
-        console.error("Startup error:", err);
-        process.exit(1);
-    }
+    // --- 5. Auto-reconnect Logic ---
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startBot();
+        }
+    });
 }
 
-startKukaTai();
+// --- 6. Logic (Recommend moving this to a separate service file) ---
+async function handleIncomingMessage(sock, msg) {
+    // Logic for onboarding, AI processing, and banking here.
+    // Ensure you use try-catch blocks to prevent global crashes.
+}
+
+startBot();
