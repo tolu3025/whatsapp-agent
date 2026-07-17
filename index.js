@@ -309,4 +309,4 @@ function startCatalogLoop(sock) {
   }, 8 * 60 * 60 * 1000);
 }
 
-startAgent():
+startAgent();
