@@ -4,7 +4,7 @@ const {
   useMultiFileAuthState, 
   DisconnectReason, 
   delay,
-  fetchLatestBaileysVersion, // CRITICAL: To fix 405
+  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   jidNormalizedUser 
 } = require('@whiskeysockets/baileys');
@@ -29,6 +29,7 @@ const Vendor = mongoose.model('Vendor', new mongoose.Schema({
   businessName: String, 
   businessDescription: String,
   bankName: String,
+  bankCode: String,
   accountNumber: String,
   accountName: String,
   faq: String,
@@ -38,7 +39,7 @@ const Vendor = mongoose.model('Vendor', new mongoose.Schema({
 
 const registrationState = new Map();
 let hasRequestedCode = false;
-let sock; 
+let sock; // Global access
 
 // ==========================================
 // 2. KUKAPAY REALTIME LISTENER
@@ -59,15 +60,13 @@ const initSupabase = () => {
 };
 
 // ==========================================
-// 3. WHATSAPP ENGINE (FIXED FOR 405 ERROR)
+// 3. WHATSAPP ENGINE (REPLY FIX & STABILITY)
 // ==========================================
 async function startWhatsAppBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   
-  // FETCH LATEST VERSION DYNAMICALLY
-  console.log('📡 Fetching latest WhatsApp version...');
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`✅ Using WA Version: ${version.join('.')} (Latest: ${isLatest})`);
+  console.log('📡 Fetching latest WhatsApp protocol...');
+  const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
     version,
@@ -76,7 +75,6 @@ async function startWhatsAppBot() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    // MODERN BROWSER IDENTITY: To bypass 405/401 flags
     browser: ["Mac OS", "Chrome", "126.0.0.0"], 
     
     syncFullHistory: false, 
@@ -93,22 +91,15 @@ async function startWhatsAppBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // --- SECURE PAIRING CODE REQUEST ---
     if (!sock.authState.creds.registered && !hasRequestedCode) {
         hasRequestedCode = true;
         const pairingNumber = process.env.PAIRING_NUMBER;
-        
         if (pairingNumber) {
-            console.log(`⏳ Authenticating device for ${pairingNumber}...`);
-            await delay(12000); // Allow socket to stabilize fully
-            
+            await delay(10000); 
             try {
                 const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
                 console.log(`🔑 YOUR PAIRING CODE: ${code}`);
-            } catch (e) {
-                console.error("❌ Pairing Denied by Server:", e.message);
-                hasRequestedCode = false; 
-            }
+            } catch (e) { hasRequestedCode = false; }
         }
     }
 
@@ -116,21 +107,19 @@ async function startWhatsAppBot() {
       const code = lastDisconnect?.error?.output?.statusCode;
       console.log(`🔴 Connection Closed. Code: ${code}`);
       hasRequestedCode = false;
-
-      // If 405 (Version error) or 401 (Auth error), we MUST wipe the session
-      if (code === 405 || code === 401 || code === DisconnectReason.loggedOut) {
-        console.log("🧹 Incompatible Version or Auth Error. Wiping session...");
+      if (code === 401 || code === 405) {
         if (fs.existsSync('./auth_session')) fs.rmSync('./auth_session', { recursive: true, force: true });
         setTimeout(startWhatsAppBot, 5000);
       } else {
         setTimeout(startWhatsAppBot, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 SUCCESS: Device Linked & Sales Agent Online!');
+      console.log('🟢 SUCCESS: Device Linked & Agent Online!');
       hasRequestedCode = false;
     }
   });
 
+  // --- MESSAGE LISTENER (THE FIX IS HERE) ---
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     const msg = messages[0];
@@ -140,43 +129,40 @@ async function startWhatsAppBot() {
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
     const cleanInput = text.toLowerCase();
 
-    const liveVendor = await Vendor.findOne({ isLive: true }); 
+    console.log(`📩 [${sender}]: ${text}`); // See exactly what users are sending
 
-    if (liveVendor && !registrationState.has(sender) && !['register', 'onboard', 'start'].includes(cleanInput)) {
+    // 1. Logic for Customers messaging a Live Vendor
+    const liveVendor = await Vendor.findOne({ isLive: true }); 
+    if (liveVendor && !registrationState.has(sender) && !['register', 'onboard', 'start'].some(t => cleanInput.includes(t))) {
         return handleSalesAI(sender, text, liveVendor);
     }
 
-    if (registrationState.has(sender) || ['register', 'onboard', 'start'].includes(cleanInput)) {
+    // 2. Logic for Onboarding (Fixed Trigger)
+    const onboardingTriggers = ['register', 'onboard', 'start', 'i want to register'];
+    if (registrationState.has(sender) || onboardingTriggers.some(t => cleanInput.includes(t))) {
         return handleVendorOnboarding(sender, msg);
     }
   });
 }
 
 // ==========================================
-// 4. SALES AI MODE (JOVIAL & PROFESSIONAL)
+// 4. SALES AI MODE
 // ==========================================
 async function handleSalesAI(customerJid, text, vendor) {
     const input = text.toLowerCase();
-    
     if (input.includes('price') || input.includes('catalog')) {
         const items = vendor.catalog.map(i => `🛍️ *${i.caption}*\n💰 ₦${i.price.toLocaleString()}\n`).join('\n');
-        await sock.sendMessage(customerJid, { text: `You have amazing taste! 😍 Check out our catalog for *${vendor.businessName}*:\n\n${items}` });
-    } 
-    else if (input.includes('buy') || input.match(/\d+/)) {
+        await sock.sendMessage(customerJid, { text: `You have great taste! 😍 Check out our catalog for *${vendor.businessName}*:\n\n${items}` });
+    } else if (input.includes('buy') || input.match(/\d+/)) {
         try {
             const res = await axios.post('https://api.flutterwave.com/v3/payments', {
                 tx_ref: `KUKA-${Date.now()}`, amount: "5000", currency: "NGN", 
-                customer: { email: "customer@kuka.ai" },
-                customizations: { title: vendor.businessName }
+                customer: { email: "customer@kuka.ai" }, customizations: { title: vendor.businessName }
             }, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
-            
-            await sock.sendMessage(customerJid, { text: `Let's get this deal closed! 🚀 You can pay securely here:\n\n${res.data.data.link}\n\nI'll confirm immediately once it's done! ✅` });
-        } catch (e) {
-            await sock.sendMessage(customerJid, { text: "Oops! Link error. Try 'buy' again! 🙏" });
-        }
-    }
-    else {
-        await sock.sendMessage(customerJid, { text: `Welcome to *${vendor.businessName}*! 🌟 I'm here to help you. Ask for our catalog to start shopping! 😊` });
+            await sock.sendMessage(customerJid, { text: `Let's close this deal! 🚀 Pay securely here:\n\n${res.data.data.link}` });
+        } catch (e) { await sock.sendMessage(customerJid, { text: "Link error. Try 'buy' again!" }); }
+    } else {
+        await sock.sendMessage(customerJid, { text: `Welcome to *${vendor.businessName}*! 🌟 I'm your AI Sales Assistant. Ask for our catalog to start shopping!` });
     }
 }
 
@@ -206,11 +192,9 @@ async function handleVendorOnboarding(sender, msg) {
             break;
         case 'confirm':
             if (text.toLowerCase() === 'yes') {
-                state.step = 'desc';
-                await sock.sendMessage(sender, { text: "Verified! ✅ Business Description?" });
+                state.step = 'desc'; await sock.sendMessage(sender, { text: "Verified! ✅ Business Description?" });
             } else {
-                state.step = 'bank';
-                await sock.sendMessage(sender, { text: "Bank Name?" });
+                state.step = 'bank'; await sock.sendMessage(sender, { text: "Bank Name?" });
             }
             break;
         case 'desc':
@@ -219,23 +203,30 @@ async function handleVendorOnboarding(sender, msg) {
             break;
         case 'faq':
             state.faq = text; state.step = 'catalog'; state.catalog = [];
-            await sock.sendMessage(sender, { text: "Upload Catalog Photos. Include the *Price* in the caption! Type *Done* when finished." });
+            await sock.sendMessage(sender, { text: "Final Task: *Upload Catalog Photos*. Include the *Price* in the caption! Type *Done* when finished." });
             break;
         case 'catalog':
             if (text.toLowerCase() === 'done') {
                 const newVendor = new Vendor({ ...state, phoneNumber: sender, isLive: true });
                 await newVendor.save();
                 registrationState.delete(sender);
-                await sock.sendMessage(sender, { text: "🎉 *LIVE!* I am now your Sales Agent." });
+                await sock.sendMessage(sender, { text: "🎉 *LIVE!* I am now your Sales Agent. I will attend to your customers and handle payments via Kukapay." });
             } else if (msg.message?.imageMessage) {
                 const cap = msg.message.imageMessage.caption || "";
-                state.catalog.push({ imageUrl: "internal", caption: cap, price: parseInt(cap.match(/\d+/)?.[0]) || 0 });
+                const price = parseInt(cap.match(/\d+/)?.[0]) || 0;
+                state.catalog.push({ imageUrl: "internal", caption: cap, price });
                 await sock.sendMessage(sender, { text: "✅ Added! Next or Done." });
             }
             break;
     }
     registrationState.set(sender, state);
 }
+
+// Keep Render Awake
+app.get('/', (req, res) => res.send('Bot Active ⚡'));
+setInterval(() => {
+    if (process.env.RENDER_EXTERNAL_URL) axios.get(process.env.RENDER_EXTERNAL_URL).catch(() => {});
+}, 300000);
 
 initSupabase(); 
 startWhatsAppBot();
