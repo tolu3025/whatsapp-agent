@@ -1,6 +1,3 @@
-// ====================================================================
-// 1. MODULES & CONFIGURATION
-// ====================================================================
 require('dotenv').config();
 const { 
   default: makeWASocket, 
@@ -17,133 +14,102 @@ const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require('openai');
 const axios = require('axios');
 const express = require('express');
+const fs = require('fs');
 
+// ==========================================
+// 1. INITIALIZATION & GUARDRAILS
+// ==========================================
 const app = express();
 app.use(express.json());
 
-// ====================================================================
-// 2. DATABASE MODELS
-// ====================================================================
-mongoose.connect(process.env.MONGODB_URI);
+const requiredEnv = ['MONGODB_URI', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'OPENAI_API_KEY', 'FLW_CLIENT_ID', 'FLW_CLIENT_SECRET'];
+requiredEnv.forEach(v => { if (!process.env[v]) console.error(`🔴 MISSING ENV: ${v}`); });
 
-const VendorSchema = new mongoose.Schema({
+mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ==========================================
+// 2. DATABASE MODELS
+// ==========================================
+const Vendor = mongoose.model('Vendor', new mongoose.Schema({
   phoneNumber: { type: String, required: true, unique: true },
   businessName: String,
   email: String,
   bankCode: String,
   accountNumber: String,
-  flwSubaccountId: String, // Flutterwave ID for split payments
+  accountName: String,
+  flwSubaccountId: String, // Critical for split payments
   catalog: [{ imageUrl: String, caption: String, price: Number }],
-  faqs: String,
   description: String,
+  faqs: String,
   activeGroups: [String],
   onboardingStep: { type: String, default: 'none' },
   isApproved: { type: Boolean, default: false }
-});
+}));
 
-const TransactionSchema = new mongoose.Schema({
+const Transaction = mongoose.model('Transaction', new mongoose.Schema({
   txRef: { type: String, unique: true },
   customerPhone: String,
   vendorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor' },
   amount: Number,
-  status: { type: String, enum: ['pending', 'success', 'expired'], default: 'pending' },
+  status: { type: String, enum: ['pending', 'success'], default: 'pending' },
   virtualAccount: String,
   createdAt: { type: Date, default: Date.now }
-});
+}));
 
-const Vendor = mongoose.model('Vendor', VendorSchema);
-const Transaction = mongoose.model('Transaction', TransactionSchema);
-
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// ====================================================================
-// 3. FLUTTERWAVE V4 SERVICE (OAUTH & SPLIT PAYMENTS)
-// ====================================================================
+// ==========================================
+// 3. FLUTTERWAVE V4 SERVICE (Split Payments)
+// ==========================================
 class FlutterwaveService {
   constructor() {
-    this.accessToken = null;
-    this.tokenExpiry = 0;
+    this.token = null;
+    this.expiry = 0;
   }
 
-  async getAuthToken() {
-    if (this.accessToken && Date.now() < this.tokenExpiry) return this.accessToken;
+  async getAuth() {
+    if (this.token && Date.now() < this.expiry) return this.token;
     const res = await axios.post('https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token', 
-      new URLSearchParams({
-        client_id: process.env.FLW_CLIENT_ID,
-        client_secret: process.env.FLW_CLIENT_SECRET,
-        grant_type: 'client_credentials'
-      }));
-    this.accessToken = res.data.access_token;
-    this.tokenExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
-    return this.accessToken;
+      new URLSearchParams({ client_id: process.env.FLW_CLIENT_ID, client_secret: process.env.FLW_CLIENT_SECRET, grant_type: 'client_credentials' }));
+    this.token = res.data.access_token;
+    this.expiry = Date.now() + (res.data.expires_in - 60) * 1000;
+    return this.token;
   }
 
-  /**
-   * Create a Subaccount for a Vendor to enable split payments
-   */
   async createSubaccount(vendor) {
-    const token = await this.getAuthToken();
+    const token = await this.getAuth();
     const res = await axios.post(`${process.env.FLW_BASE_URL}/subaccounts`, {
       account_bank: vendor.bankCode,
       account_number: vendor.accountNumber,
       business_name: vendor.businessName,
       business_email: vendor.email,
       split_type: "percentage",
-      split_value: 0.03 // Your 3% platform commission
+      split_value: 0.05 // Your 5% commission
     }, { headers: { Authorization: `Bearer ${token}` } });
     return res.data.data.subaccount_id;
   }
 
-  /**
-   * Generate a temporary (dynamic) virtual account for a specific deal
-   */
-  async createTemporaryAccount(amount, email, subaccountId) {
-    const token = await this.getAuthToken();
-    const txRef = `KUK-${Date.now()}`;
+  async createVirtualAccount(amount, subaccountId) {
+    const token = await this.getAuth();
+    const txRef = `KUKA-${Date.now()}`;
     const res = await axios.post(`${process.env.FLW_BASE_URL}/virtual-account-numbers`, {
-      email: email,
-      amount: amount,
+      email: "sales@kukatapai.com",
+      amount,
       currency: "NGN",
       tx_ref: txRef,
       is_permanent: false,
-      frequency: 1, // Single use
-      subaccounts: [{ id: subaccountId }] // Splits money automatically
+      frequency: 1,
+      subaccounts: [{ id: subaccountId }]
     }, { headers: { Authorization: `Bearer ${token}` } });
     return { ...res.data.data, txRef };
   }
 }
 const flw = new FlutterwaveService();
 
-// ====================================================================
-// 4. THE AI PA (SALES LOGIC & GUARDRAILS)
-// ====================================================================
-async function getAIReponse(customerMessage, vendor) {
-  const prompt = `You are a jovial, enthusiastic sales PA for "${vendor.businessName}". 
-  Your job: Chat with customers, promote products, and close deals.
-  Tone: Friendly, Nigerian-English (jovial), helpful.
-  
-  Business Bio: ${vendor.description}
-  FAQs: ${vendor.faqs}
-  Catalog: ${JSON.stringify(vendor.catalog)}
-
-  STRICT SECURITY RULES:
-  1. If the customer wants to buy, calculate the total price.
-  2. If they are ready to pay, respond ONLY with "TRIGGER_PAYMENT:[amount]".
-  3. Never promise prices lower than the catalog.
-  4. If asked about politics/religion, jovially redirect to the products.`;
-
-  const completion = await openai.chat.completions.create({
-    model: "gpt-3.5-turbo",
-    messages: [{ role: "system", content: prompt }, { role: "user", content: customerMessage }],
-  });
-
-  return completion.choices[0].message.content;
-}
-
-// ====================================================================
-// 5. WHATSAPP BOT & AUTOMATION
-// ====================================================================
+// ==========================================
+// 4. WHATSAPP ENGINE & AI LOGIC
+// ==========================================
 async function startAgent() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   const { version } = await fetchLatestBaileysVersion();
@@ -155,11 +121,27 @@ async function startAgent() {
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
     logger: pino({ level: 'silent' }),
-    browser: ['Mac OS', 'Chrome', '10.0.0'],
+    browser: ['Ubuntu', 'Chrome', '114.0.0'],
     syncFullHistory: false,
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr && !sock.authState.creds.registered) {
+      const code = await sock.requestPairingCode(process.env.PAIRING_NUMBER.replace(/[^0-9]/g, ''));
+      console.log(`🔑 PAIRING CODE: ${code}`);
+    }
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode;
+      if (code !== DisconnectReason.loggedOut) startAgent();
+    } else if (connection === 'open') {
+      console.log('🟢 AGENT ONLINE');
+      initSupabaseListener(sock);
+      startCatalogLoop(sock);
+    }
+  });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
@@ -168,93 +150,92 @@ async function startAgent() {
 
     const sender = jidNormalizedUser(msg.key.remoteJid);
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "");
+    const vendor = await Vendor.findOne({ phoneNumber: sender }) || await Vendor.findOne({ isApproved: true });
 
-    // Logic to find vendor (based on the group or if they are DMing the vendor's bot)
-    const vendor = await Vendor.findOne({ isApproved: true }); // Simplification for demo
+    // ONBOARDING FLOW
+    if (vendor && vendor.onboardingStep !== 'none' && vendor.onboardingStep !== 'completed') {
+      return handleOnboarding(sock, sender, text, vendor);
+    }
 
-    // 1. Simulate Typing (Guardrail against bans)
+    // TRIGGER REGISTRATION
+    if (text.toLowerCase().includes("i want to register")) {
+      await Vendor.findOneAndUpdate({ phoneNumber: sender }, { onboardingStep: 'askName' }, { upsert: true });
+      return sock.sendMessage(sender, { text: "👋 Welcome! What is your *Business Name*?" });
+    }
+
+    // AI SALES CHAT
     await sock.sendPresenceUpdate('composing', sender);
-    await delay(2000);
-
-    const aiResponse = await getAIReponse(text, vendor);
+    const aiResponse = await getAIResponse(text, vendor);
 
     if (aiResponse.includes("TRIGGER_PAYMENT:")) {
       const amount = aiResponse.split(":")[1].trim();
+      const pay = await flw.createVirtualAccount(amount, vendor.flwSubaccountId);
+      await new Transaction({ txRef: pay.txRef, customerPhone: sender, vendorId: vendor._id, amount, virtualAccount: pay.account_number }).save();
       
-      await sock.sendMessage(sender, { text: "Coming right up! Generating your secure one-time payment account... ✨" });
-
-      const payData = await flw.createTemporaryAccount(amount, "sales@vendor.com", vendor.flwSubaccountId);
-      
-      await new Transaction({
-        txRef: payData.txRef,
-        customerPhone: sender,
-        vendorId: vendor._id,
-        amount: amount,
-        virtualAccount: payData.account_number
-      }).save();
-
-      const payMsg = `🛒 *Deal Ready!*\n\nPlease transfer ₦${amount} to:\n\n` +
-                     `🏦 Bank: *${payData.bank_name}*\n` +
-                     `🔢 Account: *${payData.account_number}*\n\n` +
-                     `I'm standing by to confirm your order the moment you're done! 😊`;
+      const payMsg = `🎉 *Ready to close the deal!*\n\nTransfer ₦${amount} to:\n🏦 *${pay.bank_name}*\n🔢 *${pay.account_number}*\n\nI'm waiting here to confirm! ✨`;
       await sock.sendMessage(sender, { text: payMsg });
     } else {
       await sock.sendMessage(sender, { text: aiResponse });
     }
   });
+}
 
-  // ====================================================================
-  // 6. 8-HOUR CATALOG BROADCASTER (ANTI-SPAM)
-  // ====================================================================
+// ==========================================
+// 5. HELPER FLOWS (Onboarding, AI, Realtime)
+// ==========================================
+async function handleOnboarding(sock, sender, input, vendor) {
+  if (vendor.onboardingStep === 'askName') {
+    vendor.businessName = input; vendor.onboardingStep = 'askBank';
+    await vendor.save();
+    await sock.sendMessage(sender, { text: "Got it. What is your *Bank Name*?" });
+  } else if (vendor.onboardingStep === 'askBank') {
+    vendor.bankCode = "058"; // Simplified for demo; use a bank list lookup here
+    vendor.onboardingStep = 'askAcc';
+    await vendor.save();
+    await sock.sendMessage(sender, { text: "Send your *10-digit Account Number*:" });
+  } else if (vendor.onboardingStep === 'askAcc') {
+    vendor.accountNumber = input;
+    vendor.flwSubaccountId = await flw.createSubaccount(vendor);
+    vendor.onboardingStep = 'completed'; vendor.isApproved = true;
+    await vendor.save();
+    await sock.sendMessage(sender, { text: "✅ *Setup Complete!* You are now a verified vendor." });
+  }
+}
+
+async function getAIResponse(text, vendor) {
+  const prompt = `You are a jovial sales PA for ${vendor.businessName}. Tone: Helpful, Fun, Nigerian. If customer is ready to buy, say TRIGGER_PAYMENT:[price]. Info: ${vendor.description}`;
+  const res = await openai.chat.completions.create({
+    model: "gpt-3.5-turbo",
+    messages: [{ role: "system", content: prompt }, { role: "user", content: text }]
+  });
+  return res.choices[0].message.content;
+}
+
+function initSupabaseListener(sock) {
+  supabase.channel('tx').on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'transactions' }, async (payload) => {
+    if (payload.new.status === 'success') {
+      const tx = await Transaction.findOne({ txRef: payload.new.tx_ref, status: 'pending' });
+      if (tx) {
+        tx.status = 'success'; await tx.save();
+        await sock.sendMessage(tx.customerPhone, { text: "💰 *PAYMENT CONFIRMED!* Your deal is closed. 🥳" });
+      }
+    }
+  }).subscribe();
+}
+
+function startCatalogLoop(sock) {
   setInterval(async () => {
     const vendors = await Vendor.find({ isApproved: true });
-    for (const vendor of vendors) {
-      if (vendor.catalog.length > 0) {
-        const item = vendor.catalog[Math.floor(Math.random() * vendor.catalog.length)];
-        for (const gid of vendor.activeGroups) {
-          // Gaussian Jitter delay (simulates human timing)
-          const jitter = Math.floor(Math.random() * 10000) + 5000;
-          await delay(jitter);
-          await sock.sendMessage(gid, { 
-            image: { url: item.imageUrl }, 
-            caption: `📢 *VENDOR SPOTLIGHT: ${vendor.businessName}*\n\n${item.caption}\nPrice: ₦${item.price}\n\nTag me to buy now! 🛍️`
-          });
+    for (const v of vendors) {
+      if (v.catalog.length > 0 && v.activeGroups.length > 0) {
+        const item = v.catalog[0];
+        for (const g of v.activeGroups) {
+          await sock.sendMessage(g, { image: { url: item.imageUrl }, caption: `🔥 *Check this out from ${v.businessName}!* \n\nOnly ₦${item.price}` });
         }
       }
     }
   }, 8 * 60 * 60 * 1000);
-
-  return sock;
 }
 
-// ====================================================================
-// 7. SUPABASE REALTIME OBSERVER (PAYMENT CONFIRMATION)
-// ====================================================================
-async function initSupabaseObserver(sock) {
-  supabase
-    .channel('transactions')
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'transactions' }, async (payload) => {
-      const { tx_ref, status, customer_phone } = payload.new;
-      
-      if (status === 'success') {
-        const tx = await Transaction.findOne({ txRef: tx_ref, status: 'pending' });
-        if (tx) {
-          tx.status = 'success';
-          await tx.save();
-
-          await sock.sendMessage(tx.customerPhone, { 
-            text: `💰 *PAYMENT CONFIRMED!*\n\nThank you! Your order has been placed successfully. The vendor has been notified to start shipping. 🥳✨` 
-          });
-        }
-      }
-    })
-    .subscribe();
-}
-
-// ====================================================================
-// 8. INITIALIZATION
-// ====================================================================
-const mainSock = startAgent();
-mainSock.then(sock => initSupabaseObserver(sock));
-
+startAgent();
 app.listen(process.env.PORT || 10000);
