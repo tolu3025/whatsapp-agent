@@ -8,9 +8,10 @@ const {
   DisconnectReason, 
   delay,
   fetchLatestBaileysVersion,
-  BufferJSON,         // Added for MongoDB serialization
-  initAuthCreds,       // Added to initialize credentials in Mongo
-  proto               // Added for protocol sync matching
+  BufferJSON,         
+  initAuthCreds,       
+  proto,
+  Browsers // Native client emulation utility
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -28,7 +29,7 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('🟢 MongoDB Connected successfully.'))
   .catch(err => console.error('🔴 MongoDB Connection Error:', err));
 
-// Collection to store session states permanently
+// Permanent Mongo session token storage model
 const AuthStateSchema = new mongoose.Schema({
   _id: { type: String, required: true }, 
   data: { type: String, required: true }  
@@ -76,7 +77,7 @@ const supabase = createClient(
 );
 
 // ====================================================================
-// 3. CUSTOM MONGO AUTH STATE HANDLER (PERSIST SESSION ON DEPLOYMENTS)
+// 3. CUSTOM MONGO AUTH STATE HANDLER (PERSISTENT CROSS-DEPLOYMENTS)
 // ====================================================================
 async function useMongoAuthState() {
   const writeData = async (data, id) => {
@@ -261,9 +262,9 @@ async function verifyAccountNumber(accountNumber, bankCode) {
   }
 }
 
-// ==========================================
-// 5. WHATSAPP BOT ENGINE
-// ==========================================
+// ====================================================================
+// 5. WHATSAPP BOT ENGINE (FIXED BROWSER CHROME MACOS & AGENT NAMESPACE)
+// ====================================================================
 const registrationState = new Map();
 
 const REGISTRATION_TRIGGERS = [
@@ -274,7 +275,7 @@ const REGISTRATION_TRIGGERS = [
 let hasRequestedCode = false;
 
 async function startWhatsAppBot() {
-  console.log('🚀 Initializing WhatsApp connection (Mongo-backed Auth)...');
+  console.log('🚀 Initializing WhatsApp connection (Mongo-backed Auth + macOS Fingerprint)...');
 
   let version = [2, 3000, 1017578213]; 
   try {
@@ -285,7 +286,7 @@ async function startWhatsAppBot() {
     console.warn('⚠️ Could not fetch latest WA version dynamically, using fallback version.', err.message);
   }
 
-  // Fetch authentication state directly from MongoDB instead of local disk!
+  // Fetch authentication state directly from MongoDB
   const { state, saveCreds } = await useMongoAuthState();
   
   const sock = makeWASocket({
@@ -293,8 +294,11 @@ async function startWhatsAppBot() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    browser: ['Mac OS', 'Chrome', '10.0.0'], 
+    
+    // 🖥️ EXPLICIT GOOGLE CHROME (MAC OS) EMULATION FOR THE LINK NOTIFICATION
+    browser: Browsers.macOS('Chrome'), 
     name: 'kukatai-agent',
+
     connectTimeoutMs: 60000,       
     keepAliveIntervalMs: 30000,    
     defaultQueryTimeoutMs: 60000,  
@@ -312,11 +316,12 @@ async function startWhatsAppBot() {
       if (pairingNumber) {
         const cleanNumber = pairingNumber.replace(/[^0-9]/g, '');
         try {
-          console.log(`⏳ Requesting a fresh pairing code for +${cleanNumber}...`);
+          console.log(`⏳ Requesting a verified pairing code for +${cleanNumber}...`);
           await delay(5000); 
           const code = await sock.requestPairingCode(cleanNumber);
           console.log(`🔑 ================================================`);
-          console.log(`🔑 NEW ACTIVE WHATSAPP PAIRING CODE: ${code}`);
+          console.log(`🔑 CODES TRIGGERED FOR MAC OS INSTANCE.`);
+          console.log(`🔑 ENTER THIS WHATSAPP PAIRING CODE: ${code}`);
           console.log(`🔑 ================================================`);
         } catch (err) {
           console.error('🔴 Error generating WhatsApp Pairing Code:', err.message || err);
@@ -335,7 +340,7 @@ async function startWhatsAppBot() {
       hasRequestedCode = false;
 
       if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
-        console.log('⚡ Immediate restart payload received. Reconnecting...');
+        console.log('⚡ Restart code intercepted. Reconnecting payload to lock session status...');
         startWhatsAppBot();
       } else if (statusCode === 411 || statusCode === 412) {
         console.warn('⚠️ Session desynchronization detected. Resetting database session collection...');
@@ -348,7 +353,7 @@ async function startWhatsAppBot() {
         }, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 WhatsApp Connection successfully opened and synced in MongoDB!');
+      console.log('🟢 WhatsApp Connection successfully opened and synced inside MongoDB!');
       hasRequestedCode = false;
     }
   });
@@ -358,7 +363,7 @@ async function startWhatsAppBot() {
     for (const msg of messages) {
       try {
         if (msg.messageStubType === 'CIPHERTEXT') {
-          console.warn('⚠️ Skipping undecryptable message trace.');
+          console.warn('⚠️ Skipping undecryptable trace.');
           continue;
         }
         await handleWhatsAppFlow(sock, msg);
