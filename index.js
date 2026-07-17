@@ -1,35 +1,25 @@
 /**
  * PRODUCTION-READY MULTI-TENANT WHATSAPP ENGINE & PAYMENTS INTEGRATION
  * Supported Library: @whiskeysockets/baileys (v7 RC Compatible)
- * Features:
- *  - Native Baileys v7 RC Architecture (Fixes 428 Connection Closed via UBUNTU/CHROME sub-platform emulation)
- *  - Custom Multi-Tenant Auth Adaptor (MongoDB & Local fallback)
- *  - Robust Exponential Reconnection Logic
- *  - Supabase Real-Time Payment Event Handlers (Flutterwave v3/v4 validation)
- *  - Multi-Tenant Vendor Onboarding and Context Isolation
- *  - AI WhatsApp Agent (Retrieval-Augmented Chat & NLP routers)
- *  - Group Assistant Core
- *  - Supabase/MongoDB Storage integration (Promo Image Storage)
+ * Format: CommonJS (Prevents ES Module 'type: module' crashes)
  */
 
-import makeWASocket, {
-    useMultiFileAuthState,
+const makeWASocket = require('@whiskeysockets/baileys').default || require('@whiskeysockets/baileys');
+const {
     DisconnectReason,
     fetchLatestBaileysVersion,
     delay,
-    jidDecode,
-    getAggregateVotesInPollMessage
-} from '@whiskeysockets/baileys';
-import pino from 'pino';
-import { Boom } from '@hapi/boom';
-import { createClient } from '@supabase/supabase-js';
-import { MongoClient } from 'mongodb';
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
+    jidDecode
+} = require('@whiskeysockets/baileys');
+const pino = require('pino');
+const { Boom } = require('@hapi/boom');
+const { createClient } = require('@supabase/supabase-js');
+const { MongoClient } = require('mongodb');
+const express = require('express');
+const cors = require('cors');
 
 // Load environment variables
-dotenv.config();
+require('dotenv').config();
 
 const app = express();
 app.use(express.json());
@@ -44,18 +34,6 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 const mongoClient = new MongoClient(process.env.MONGODB_URI);
 let db;
-
-async function connectMongo() {
-    try {
-        await mongoClient.connect();
-        db = mongoClient.db(process.env.MONGO_DB_NAME || 'whatsapp_tenant_db');
-        logger.info('Connected securely to MongoDB.');
-    } catch (err) {
-        logger.error('Failed to connect to MongoDB', err);
-        process.exit(1);
-    }
-}
-await connectMongo();
 
 // Supabase configuration
 const supabase = createClient(
@@ -106,7 +84,6 @@ async function useMongoAuthState(tenantId) {
         }
     };
 
-    // Load initial credentials or generate fresh structure
     const credsDoc = await readData('creds');
     const creds = credsDoc || {};
 
@@ -120,9 +97,6 @@ async function useMongoAuthState(tenantId) {
                         ids.map(async (id) => {
                             let value = await readData(`${type}-${id}`);
                             if (value) {
-                                if (type === 'app-state-sync-key') {
-                                    value = value; // Preserve formatting
-                                }
                                 data[id] = value;
                             }
                         })
@@ -163,7 +137,6 @@ async function useMongoAuthState(tenantId) {
 async function startTenantSocket(tenantId, options = {}) {
     logger.info(`[Instance] Initializing client for Tenant: ${tenantId}...`);
 
-    // Clean up active session caches safely if they already exist
     if (activeInstances.has(tenantId)) {
         try {
             const oldSock = activeInstances.get(tenantId);
@@ -183,21 +156,19 @@ async function startTenantSocket(tenantId, options = {}) {
 
     /**
      * CRITICAL BUGFIX: 428 Connection Closed
-     * WhatsApp server-side controls started rejecting handshakes advertising WIN32/DARWIN desktop properties.
-     * Forcing a generic linux Chrome-browser configuration to mask the emulator correctly.
+     * Bypasses strict desktop user-agent checks by presenting Chrome/Ubuntu parameters
      */
     const sockConfig = {
         version,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
         auth: state,
-        // Using chrome/ubuntu bypasses desktop 428 validations perfectly on Baileys v7 RC
         browser: ['Ubuntu', 'Chrome', '20.0.0'],
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
         emitOwnEvents: true,
         defaultQueryTimeoutMs: 0,
-        syncFullHistory: false, // Speeds up registration cycles dramatically
+        syncFullHistory: false,
         markOnlineOnConnect: true,
     };
 
@@ -207,7 +178,6 @@ async function startTenantSocket(tenantId, options = {}) {
     // Dynamic pairing code flow if requested
     if (options.requestPairingCode && options.phoneNumber) {
         // Wait exactly 5 seconds to let handshake negotiate cleanly before calling requestPairingCode
-        // This stops the premature connection teardowns (Reason Code 428) cold.
         setTimeout(async () => {
             try {
                 const formattedPhone = options.phoneNumber.replace(/[^0-9]/g, '');
@@ -249,11 +219,9 @@ async function startTenantSocket(tenantId, options = {}) {
 
         if (connection === 'open') {
             logger.info(`[Socket-State] Tenant ${tenantId} is CONNECTED & active.`);
-            // Clean dynamic state markers
             await db.collection('pairing_codes').deleteOne({ tenantId });
             await db.collection('whatsapp_sessions').deleteOne({ tenantId, key: 'qr_string' });
             
-            // Mark online in vendor configurations
             await db.collection('vendors').updateOne(
                 { tenantId },
                 { $set: { status: 'connected', lastSeen: new Date() } },
@@ -262,11 +230,11 @@ async function startTenantSocket(tenantId, options = {}) {
         }
 
         if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-            const errorDescription = lastDisconnect?.error?.message || 'Unknown Error';
+            const lastDisconnectError = lastDisconnect && lastDisconnect.error;
+            const statusCode = lastDisconnectError ? lastDisconnectError.output && lastDisconnectError.output.statusCode : null;
+            const errorDescription = lastDisconnectError ? lastDisconnectError.message : 'Unknown Error';
             logger.warn(`[Socket-Closed] Tenant ${tenantId} closed: Code ${statusCode} - ${errorDescription}`);
 
-            // Mark offline in vendor DB
             await db.collection('vendors').updateOne(
                 { tenantId },
                 { $set: { status: 'disconnected', offlineAt: new Date() } }
@@ -275,12 +243,11 @@ async function startTenantSocket(tenantId, options = {}) {
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
             if (shouldReconnect) {
-                // Determine exponential backoff delay based on incident severity
                 let reconnectDelay = 5000;
                 if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-                    reconnectDelay = 1000; // Fast reconnect on server requests
+                    reconnectDelay = 1000;
                 } else if (statusCode === 428) {
-                    reconnectDelay = 10000; // Back off when rate limited or flagged
+                    reconnectDelay = 10000;
                 }
 
                 logger.info(`[Instance-Recovery] Re-initializing ${tenantId} in ${reconnectDelay / 1000}s...`);
@@ -296,7 +263,6 @@ async function startTenantSocket(tenantId, options = {}) {
         }
     });
 
-    // Handle Incoming Messages
     sock.ev.on('messages.upsert', async (chatUpdate) => {
         try {
             const { messages, type } = chatUpdate;
@@ -304,22 +270,20 @@ async function startTenantSocket(tenantId, options = {}) {
 
             for (const msg of messages) {
                 if (!msg.message) continue;
-                if (msg.key.fromMe) continue; // Ignore self messages
+                if (msg.key.fromMe) continue;
 
                 const senderJid = msg.key.remoteJid;
                 const textMessage = msg.message.conversation || 
-                                    msg.message.extendedTextMessage?.text || 
-                                    msg.message.imageMessage?.caption || '';
+                                    (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) || 
+                                    (msg.message.imageMessage && msg.message.imageMessage.caption) || '';
 
                 logger.debug(`[Inbound] ${senderJid} said: "${textMessage}"`);
 
-                // 1. Check if vendor wants AI Agent responses enabled
                 const vendor = await db.collection('vendors').findOne({ tenantId });
-                if (vendor?.aiAgentEnabled && textMessage) {
+                if (vendor && vendor.aiAgentEnabled && textMessage) {
                     await handleAIAgentResponse(tenantId, sock, senderJid, textMessage, msg);
                 }
 
-                // 2. Check for potential Group Assistant rules
                 if (senderJid.endsWith('@g.us')) {
                     await handleGroupAssistant(tenantId, sock, senderJid, textMessage, msg);
                 }
@@ -335,23 +299,17 @@ async function startTenantSocket(tenantId, options = {}) {
 // =========================================================================
 // 4. AI WHATSAPP AGENT & NLP ROUTER (Context Aware)
 // =========================================================================
-/**
- * Resolves context-aware AI interactions and replies using standard templates
- */
 async function handleAIAgentResponse(tenantId, sock, jid, text, originMsg) {
-    // Keep typing state active to feel human
     await sock.sendPresenceUpdate('composing', jid);
     await delay(2000);
 
-    // Custom retrieval logic based on multi-tenant onboarding parameters
     const vendor = await db.collection('vendors').findOne({ tenantId });
-    const bizName = vendor?.businessName || 'Our Store';
-    const supportFallback = vendor?.supportPhone || 'our support line';
+    const bizName = (vendor && vendor.businessName) || 'Our Store';
+    const supportFallback = (vendor && vendor.supportPhone) || 'our support line';
 
     let replyText = '';
     const normalizedText = text.toLowerCase();
 
-    // Context routers
     if (normalizedText.includes('order') || normalizedText.includes('buy')) {
         replyText = `Welcome to *${bizName}*! 🛒 \nTo make placing your order fast, you can browse through our menu or catalog here. Type "pay" to check out our automated payment options.`;
     } else if (normalizedText.includes('price') || normalizedText.includes('cost')) {
@@ -359,7 +317,6 @@ async function handleAIAgentResponse(tenantId, sock, jid, text, originMsg) {
     } else if (normalizedText.includes('pay') || normalizedText.includes('checkout')) {
         replyText = `We securely accept card, account transfers, and USSD payments directly via *Flutterwave* integrations! 💳 Type "onboard" if you are a vendor wishing to accept payments on your platform.`;
     } else {
-        // Fallback default system model template
         replyText = `Hi there! Thanks for reaching out to *${bizName}* 🤖. How can we help you today? \n\nFeel free to ask about our custom automation features, vendor setup, or request support at ${supportFallback}.`;
     }
 
@@ -370,9 +327,6 @@ async function handleAIAgentResponse(tenantId, sock, jid, text, originMsg) {
 // =========================================================================
 // 5. GROUP ASSISTANT ACTIONS
 // =========================================================================
-/**
- * Processes rules, command patterns and filters for group contexts
- */
 async function handleGroupAssistant(tenantId, sock, groupJid, text, originMsg) {
     const isCommand = text.startsWith('/');
     if (!isCommand) return;
@@ -393,10 +347,6 @@ async function handleGroupAssistant(tenantId, sock, groupJid, text, originMsg) {
 // =========================================================================
 // 6. SUPABASE REAL-TIME PAYMENT LISTENER & FLUTTERWAVE CONTROLLER
 // =========================================================================
-/**
- * Realtime listener reacting to new transactions written directly in Supabase
- * Tightly coupled to dynamic Flutterwave Webhook processing structures
- */
 function initializePaymentListener() {
     logger.info('[Supabase-Payments] Booting real-time subscription listener...');
 
@@ -413,10 +363,8 @@ function initializePaymentListener() {
                 const { tenantId, amount, currency, status, reference, customerPhone, txId } = payload.new;
                 logger.info(`[Payment-Event] New payment registered. Tx: ${txId}, Tenant: ${tenantId}, Status: ${status}`);
 
-                // Ignore incomplete state transactions
                 if (status !== 'successful' && status !== 'completed') return;
 
-                // Grab dynamic socket mapping to inform customer
                 const tenantSock = activeInstances.get(tenantId);
                 if (tenantSock) {
                     try {
@@ -433,22 +381,17 @@ function initializePaymentListener() {
         )
         .subscribe();
 }
-initializePaymentListener();
 
 // =========================================================================
 // 7. MULTI-TENANT ONBOARDING FLOW (VENDOR CREATOR)
 // =========================================================================
-/**
- * Dynamic vendor creation logic executing validation parameters on database inserts
- */
 async function registerNewVendor(vendorConfig) {
-    const { tenantId, businessName, email, initialPhone } = vendorConfig;
+    const { tenantId, businessName, email } = vendorConfig;
 
     if (!tenantId || !businessName) {
         throw new Error('Crucial properties (tenantId, businessName) missing from registration parameters.');
     }
 
-    // Upsert record into central configuration collection
     await db.collection('vendors').updateOne(
         { tenantId },
         {
@@ -471,9 +414,6 @@ async function registerNewVendor(vendorConfig) {
 // 8. EXPRESS CONTROL WEB APIs
 // =========================================================================
 
-/**
- * Endpoint: Register and initialize a new Multi-Tenant vendor
- */
 app.post('/api/tenant/onboard', async (req, res) => {
     try {
         const { tenantId, businessName, email, initialPhone } = req.body;
@@ -488,9 +428,6 @@ app.post('/api/tenant/onboard', async (req, res) => {
     }
 });
 
-/**
- * Endpoint: Connect instance dynamically via Pairing Code or QR Code
- */
 app.post('/api/tenant/connect', async (req, res) => {
     try {
         const { tenantId, phoneNumber, usePairingCode } = req.body;
@@ -503,8 +440,7 @@ app.post('/api/tenant/connect', async (req, res) => {
             return res.status(400).json({ success: false, error: 'phoneNumber is required when using Pairing Code.' });
         }
 
-        // Initialize instance
-        const sock = await startTenantSocket(tenantId, {
+        await startTenantSocket(tenantId, {
             requestPairingCode: !!usePairingCode,
             phoneNumber: phoneNumber || null
         });
@@ -521,9 +457,6 @@ app.post('/api/tenant/connect', async (req, res) => {
     }
 });
 
-/**
- * Endpoint: Query current instance pairing status / codes
- */
 app.get('/api/tenant/status/:tenantId', async (req, res) => {
     try {
         const { tenantId } = req.params;
@@ -533,18 +466,15 @@ app.get('/api/tenant/status/:tenantId', async (req, res) => {
 
         res.status(200).json({
             tenantId,
-            status: tenant?.status || 'disconnected',
-            pairingCode: pairingDoc?.code || null,
-            qrCode: qrDoc?.data || null
+            status: (tenant && tenant.status) || 'disconnected',
+            pairingCode: (pairingDoc && pairingDoc.code) || null,
+            qrCode: (qrDoc && qrDoc.data) || null
         });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-/**
- * Flutterwave Dynamic Payment webhook listener gateway
- */
 app.post('/api/webhooks/flutterwave', async (req, res) => {
     try {
         const signature = req.headers['verif-hash'];
@@ -557,11 +487,8 @@ app.post('/api/webhooks/flutterwave', async (req, res) => {
 
         if (event === 'charge.completed' && data.status === 'successful') {
             const { tx_ref, amount, currency, customer, id } = data;
-            
-            // Extract tenant identifier from the transaction reference (e.g., "TENANT123_TX_456")
             const tenantId = tx_ref.split('_')[0] || 'default';
 
-            // Insert into Supabase which triggers our real-time payment listener automatically
             const { error } = await supabase.from('transactions').insert({
                 tenantId,
                 amount,
@@ -585,8 +512,31 @@ app.post('/api/webhooks/flutterwave', async (req, res) => {
     }
 });
 
-// Start Express Server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    logger.info(`🚀 Multi-Tenant WhatsApp Server running seamlessly on Port ${PORT}`);
-});
+// =========================================================================
+// 9. CLEAN BOOTSTRAP INITIALIZATION
+// =========================================================================
+async function bootstrap() {
+    try {
+        logger.info('Starting Multi-Tenant Core Services...');
+        
+        // 1. Establish MongoDB connection first
+        await mongoClient.connect();
+        db = mongoClient.db(process.env.MONGO_DB_NAME || 'whatsapp_tenant_db');
+        logger.info('Connected securely to MongoDB.');
+
+        // 2. Start Payment Event Real-time Subscriptions
+        initializePaymentListener();
+
+        // 3. Start Express HTTP Server
+        const PORT = process.env.PORT || 3000;
+        app.listen(PORT, () => {
+            logger.info(`🚀 Multi-Tenant WhatsApp Server running seamlessly on Port ${PORT}`);
+        });
+
+    } catch (err) {
+        logger.error('CRITICAL BOOTSTRAP FAILURE:', err);
+        process.exit(1);
+    }
+}
+
+bootstrap();
