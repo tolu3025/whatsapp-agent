@@ -1,21 +1,22 @@
 // ====================================================================
-// 1. ENVIRONMENT INITIALIZATION (MUST BE THE ABSOLUTE FIRST STEP)
+// 1. ENVIRONMENT INITIALIZATION
 // ====================================================================
 require('dotenv').config();
 
 const { 
   default: makeWASocket, 
-  useMultiFileAuthState, 
   DisconnectReason, 
   delay,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  BufferJSON,         // Added for MongoDB serialization
+  initAuthCreds,       // Added to initialize credentials in Mongo
+  proto               // Added for protocol sync matching
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const express = require('express');
-const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -26,6 +27,13 @@ app.use(express.json());
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('🟢 MongoDB Connected successfully.'))
   .catch(err => console.error('🔴 MongoDB Connection Error:', err));
+
+// Collection to store session states permanently
+const AuthStateSchema = new mongoose.Schema({
+  _id: { type: String, required: true }, 
+  data: { type: String, required: true }  
+});
+const AuthState = mongoose.model('AuthState', AuthStateSchema);
 
 const VendorSchema = new mongoose.Schema({
   phoneNumber: { type: String, required: true, unique: true },
@@ -67,8 +75,69 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// ====================================================================
+// 3. CUSTOM MONGO AUTH STATE HANDLER (PERSIST SESSION ON DEPLOYMENTS)
+// ====================================================================
+async function useMongoAuthState() {
+  const writeData = async (data, id) => {
+    const serialized = JSON.stringify(data, BufferJSON.replacer);
+    await AuthState.replaceOne({ _id: id }, { data: serialized }, { upsert: true });
+  };
+
+  const readData = async (id) => {
+    const doc = await AuthState.findById(id);
+    if (!doc) return null;
+    return JSON.parse(doc.data, BufferJSON.reviver);
+  };
+
+  const removeData = async (id) => {
+    await AuthState.deleteOne({ _id: id });
+  };
+
+  const creds = (await readData('creds')) || initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          await Promise.all(
+            ids.map(async (id) => {
+              let value = await readData(`${type}-${id}`);
+              if (type === 'app-state-sync-key' && value) {
+                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+              }
+              data[id] = value;
+            })
+          );
+          return data;
+        },
+        set: async (data) => {
+          const tasks = [];
+          for (const category of Object.keys(data)) {
+            for (const id of Object.keys(data[category])) {
+              const value = data[category][id];
+              const key = `${category}-${id}`;
+              if (value) {
+                tasks.push(writeData(value, key));
+              } else {
+                tasks.push(removeData(key));
+              }
+            }
+          }
+          await Promise.all(tasks);
+        }
+      }
+    },
+    saveCreds: async () => {
+      await writeData(creds, 'creds');
+    }
+  };
+}
+
 // ==========================================
-// 3. LIVE FLUTTERWAVE V4 UTILITIES
+// 4. LIVE FLUTTERWAVE V4 UTILITIES
 // ==========================================
 const FLW_BASE_URL = process.env.FLW_BASE_URL || 'https://f4bexperience.flutterwave.com';
 const FLW_CLIENT_ID = process.env.FLW_CLIENT_ID;
@@ -192,9 +261,9 @@ async function verifyAccountNumber(accountNumber, bankCode) {
   }
 }
 
-// ====================================================================
-// 4. WHATSAPP BOT ENGINE WITH AUTO-DECRYPT RECOVERY
-// ====================================================================
+// ==========================================
+// 5. WHATSAPP BOT ENGINE
+// ==========================================
 const registrationState = new Map();
 
 const REGISTRATION_TRIGGERS = [
@@ -205,7 +274,7 @@ const REGISTRATION_TRIGGERS = [
 let hasRequestedCode = false;
 
 async function startWhatsAppBot() {
-  console.log('🚀 Initializing WhatsApp connection...');
+  console.log('🚀 Initializing WhatsApp connection (Mongo-backed Auth)...');
 
   let version = [2, 3000, 1017578213]; 
   try {
@@ -216,18 +285,16 @@ async function startWhatsAppBot() {
     console.warn('⚠️ Could not fetch latest WA version dynamically, using fallback version.', err.message);
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState('auth_session');
+  // Fetch authentication state directly from MongoDB instead of local disk!
+  const { state, saveCreds } = await useMongoAuthState();
   
   const sock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    
-    // Explicit browser fingerprint representing "Google Chrome (Mac OS)"
     browser: ['Mac OS', 'Chrome', '10.0.0'], 
     name: 'kukatai-agent',
-
     connectTimeoutMs: 60000,       
     keepAliveIntervalMs: 30000,    
     defaultQueryTimeoutMs: 60000,  
@@ -245,11 +312,11 @@ async function startWhatsAppBot() {
       if (pairingNumber) {
         const cleanNumber = pairingNumber.replace(/[^0-9]/g, '');
         try {
-          console.log(`⏳ Handshake successful. Generating pairing code for +${cleanNumber}...`);
+          console.log(`⏳ Requesting a fresh pairing code for +${cleanNumber}...`);
           await delay(5000); 
           const code = await sock.requestPairingCode(cleanNumber);
           console.log(`🔑 ================================================`);
-          console.log(`🔑 ENTER THIS WHATSAPP PAIRING CODE: ${code}`);
+          console.log(`🔑 NEW ACTIVE WHATSAPP PAIRING CODE: ${code}`);
           console.log(`🔑 ================================================`);
         } catch (err) {
           console.error('🔴 Error generating WhatsApp Pairing Code:', err.message || err);
@@ -267,18 +334,12 @@ async function startWhatsAppBot() {
       console.log(`🔴 Connection closed. Status Code: ${statusCode}. Reconnecting: ${shouldReconnect}`);
       hasRequestedCode = false;
 
-      // Force instant clean-restart on protocol stream requests
       if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
-        console.log('⚡ Immediate restart payload received. Reconnecting to finalize paired state...');
+        console.log('⚡ Immediate restart payload received. Reconnecting...');
         startWhatsAppBot();
       } else if (statusCode === 411 || statusCode === 412) {
-        // Automatically delete corrupted prekeys / session state on bad sync disconnect codes
-        console.warn('⚠️ Session desynchronization detected. Clearing auth cache directories...');
-        try {
-          fs.rmSync('auth_session', { recursive: true, force: true });
-        } catch (e) {
-          console.error('Failed to clear auth_session directory:', e.message);
-        }
+        console.warn('⚠️ Session desynchronization detected. Resetting database session collection...');
+        await AuthState.deleteMany({});
         startWhatsAppBot();
       } else if (shouldReconnect) {
         console.log('⏳ Waiting 10 seconds before attempting reconnection...');
@@ -287,19 +348,17 @@ async function startWhatsAppBot() {
         }, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 WhatsApp Connection successfully opened!');
+      console.log('🟢 WhatsApp Connection successfully opened and synced in MongoDB!');
       hasRequestedCode = false;
     }
   });
 
-  // Safe Decryption Filter (Skips processing bad/broken session updates silently)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
-        // Silently skip if message has invalid/undecryptable content to prevent crashes
         if (msg.messageStubType === 'CIPHERTEXT') {
-          console.warn('⚠️ Skipping a message context that cannot be decrypted.');
+          console.warn('⚠️ Skipping undecryptable message trace.');
           continue;
         }
         await handleWhatsAppFlow(sock, msg);
@@ -311,7 +370,7 @@ async function startWhatsAppBot() {
 }
 
 // ==========================================
-// 5. FLOW HANDLERS (ONBOARDING, GROUP, TRANSACTIONS)
+// 6. FLOW HANDLERS (ONBOARDING, GROUP, TRANSACTIONS)
 // ==========================================
 async function handleWhatsAppFlow(sock, msg) {
   const sender = msg.key.remoteJid;
@@ -471,7 +530,7 @@ async function handleRegistrationWizard(sock, sender, text) {
   }
 }
 
-// Start WhatsApp Connection Setup
+// Start WhatsApp Bot Connection
 startWhatsAppBot();
 
 // Express Server Setup
