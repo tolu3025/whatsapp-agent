@@ -253,13 +253,18 @@ async function startWhatsAppBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  // Connection Update Handler with 10-second spam safety delay
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log('🔴 Connection closed. Reconnecting...', shouldReconnect);
+      
       if (shouldReconnect) {
-        startWhatsAppBot();
+        console.log('⏳ Waiting 10 seconds before attempting reconnection to prevent log spam...');
+        setTimeout(() => {
+          startWhatsAppBot();
+        }, 10000);
       }
     } else if (connection === 'open') {
       console.log('🟢 WhatsApp Connection successfully opened!');
