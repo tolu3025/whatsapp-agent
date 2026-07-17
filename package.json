@@ -1,26 +1,22 @@
 {
-  "name": "whatsapp-agent",
+  "name": "kukatai-agent",
   "version": "1.0.0",
-  "description": "",
+  "description": "Multi-tenant WhatsApp Engine and Payments Integration",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "@google/genai": "^2.10.0",
-    "@supabase/supabase-js": "^2.110.7",
-    "@whiskeysockets/baileys": "^7.0.0-rc13",
-    "axios": "^1.18.1",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "mongoose": "^9.7.4",
-    "node-cron": "^4.6.0",
-    "openai": "^6.45.0",
-    "pino": "^10.3.1",
-    "qrcode-terminal": "^0.12.0"
+    "@hapi/boom": "^10.0.1",
+    "@supabase/supabase-js": "^2.43.4",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongodb": "^6.7.0",
+    "pino": "^9.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
