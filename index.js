@@ -7,7 +7,8 @@ const {
   default: makeWASocket, 
   useMultiFileAuthState, 
   DisconnectReason, 
-  delay 
+  delay,
+  Browsers
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -211,7 +212,6 @@ async function verifyAccountNumber(accountNumber, bankCode) {
 // ==========================================
 const registrationState = new Map();
 
-// Flexible vendor registration trigger phrases
 const REGISTRATION_TRIGGERS = [
   '!register',
   'register',
@@ -230,21 +230,24 @@ async function startWhatsAppBot() {
     auth: state,
     printQRInTerminal: false, 
     logger: pino({ level: 'silent' }),
-    browser: ['Ubuntu', 'Chrome', '20.0.04'] 
+    // Explicitly identify as standard desktop Chrome to avoid connection handshaking drops
+    browser: Browsers.ubuntu('Chrome')
   });
 
-  // Pairing Logic Activation
+  // Pairing Logic Activation with safety buffer to completely prevent 428 Precondition Required
   if (!sock.authState.creds.registered) {
     const pairingNumber = process.env.PAIRING_NUMBER; 
     if (pairingNumber) {
-      await delay(3000); 
+      // 10-second delay allows the WebSocket connection to finish full authentication handshakes
+      await delay(10000); 
       try {
+        console.log(`⏳ Requesting pairing code for ${pairingNumber}...`);
         const code = await sock.requestPairingCode(pairingNumber.trim());
         console.log(`🔑 ================================================`);
         console.log(`🔑 ENTER THIS WHATSAPP PAIRING CODE: ${code}`);
         console.log(`🔑 ================================================`);
       } catch (err) {
-        console.error('🔴 Error generating WhatsApp Pairing Code:', err);
+        console.error('🔴 Error generating WhatsApp Pairing Code:', err.message || err);
       }
     } else {
       console.log('⚠️ PAIRING_NUMBER environment variable is missing. Add it to utilize pairing codes.');
