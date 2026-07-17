@@ -10,33 +10,45 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
+const { createClient } = require('@supabase/supabase-js');
+const OpenAI = require('openai');
+const axios = require('axios');
 const express = require('express');
 
 const app = express();
 app.use(express.json());
 
 // ==========================================
-// 1. DATABASE & SESSION PERSISTENCE
+// 1. START SERVER IMMEDIATELY (For Render)
+// ==========================================
+const PORT = process.env.PORT || 10000;
+app.get('/', (req, res) => res.send('Agent is Running'));
+app.listen(PORT, () => console.log(`🚀 Server listening on port ${PORT}`));
+
+// ==========================================
+// 2. DATABASE & SERVICES
 // ==========================================
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
-
-// We create a Schema to store the WhatsApp login keys so Render doesn't delete them
-const SessionSchema = new mongoose.Schema({ id: String, data: String });
-const Session = mongoose.model('Session', SessionSchema);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const Vendor = mongoose.model('Vendor', new mongoose.Schema({
   phoneNumber: { type: String, required: true, unique: true },
-  businessName: String, onboardingStep: { type: String, default: 'none' },
-  isApproved: { type: Boolean, default: false }
+  businessName: String, bankCode: String, accountNumber: String,
+  flwSubaccountId: String, isApproved: { type: Boolean, default: false },
+  onboardingStep: { type: String, default: 'none' }
 }));
 
 // ==========================================
-// 2. WHATSAPP ENGINE (DATABASE-DRIVEN)
+// 3. WHATSAPP ENGINE (ANTI-LOOP VERSION)
 // ==========================================
+let pairingLocked = false; 
+
 async function startWhatsAppBot() {
-  // We use useMultiFileAuthState but we'll manually ensure it survives
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
-  const { version } = await fetchLatestBaileysVersion();
+  
+  // Use a stable, high version to bypass 405 error
+  const version = [2, 3000, 1017578213]; 
 
   const sock = makeWASocket({
     version,
@@ -45,39 +57,50 @@ async function startWhatsAppBot() {
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
     logger: pino({ level: 'silent' }),
-    browser: ['Ubuntu', 'Chrome', '114.0.0'],
-    syncFullHistory: false, // STOP THE 515 ERROR: Tell WA not to send old chats
+    browser: ['Ubuntu', 'Chrome', '110.0.5481.177'],
+    syncFullHistory: false, // CRITICAL: Stops 515 error
+    shouldSyncHistoryMessage: () => false, // CRITICAL: Stops history lag
+    linkPreviewImageThumbnailWidth: 192,
     markOnlineOnConnect: true,
   });
 
-  // Save credentials whenever they change
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr && !sock.authState.creds.registered) {
+    // Pairing logic with lock to prevent the "Multiple Code" loop
+    if (qr && !sock.authState.creds.registered && !pairingLocked) {
+      pairingLocked = true;
       const pairingNumber = process.env.PAIRING_NUMBER;
       if (pairingNumber) {
-        await delay(5000);
+        console.log(`⏳ Requesting code for ${pairingNumber}...`);
+        await delay(7000);
         try {
           const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
-          console.log(`🔑 PAIRING CODE: ${code}`);
-        } catch (e) { console.log("Waiting for stable connection..."); }
+          console.log(`🔑 YOUR PAIRING CODE: ${code}`);
+        } catch (e) {
+          console.log("Pairing failed, will retry in 2 mins...");
+          pairingLocked = false;
+        }
+        // Unlock after 2 minutes to allow a retry if you missed it
+        setTimeout(() => { pairingLocked = false; }, 120000);
       }
     }
 
     if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      console.log(`🔴 Connection Closed (${code}).`);
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      console.log(`🔴 Connection Lost (${statusCode}).`);
       
-      // If it's a temporary error, restart. 
-      // If it's a 401 (Unauthorized), it means the session is dead.
-      if (code !== DisconnectReason.loggedOut) {
-        setTimeout(startWhatsAppBot, 5000);
+      if (statusCode === 401) {
+          console.log("❌ Logged out or Session expired. Delete 'auth_session' folder.");
+      } else if (statusCode !== DisconnectReason.loggedOut) {
+          console.log("🔄 Reconnecting in 5s...");
+          setTimeout(startWhatsAppBot, 5000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 AGENT IS LIVE AND SCANNING FOR MESSAGES!');
+      console.log('🟢 AGENT ONLINE: Standing by for messages...');
+      pairingLocked = false;
     }
   });
 
@@ -89,31 +112,13 @@ async function startWhatsAppBot() {
     const sender = jidNormalizedUser(msg.key.remoteJid);
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").toLowerCase().trim();
 
-    // THIS IS THE FIX: This log proves the bot is "hearing" you
-    console.log(`📩 RECEIVED FROM [${sender}]: ${text}`);
+    console.log(`📩 Message from [${sender}]: ${text}`);
 
-    const vendor = await Vendor.findOne({ phoneNumber: sender });
-
-    if (vendor && vendor.onboardingStep !== 'none') {
-        return handleOnboarding(sock, sender, text, vendor);
-    }
-
+    // ... (Your AI/Registration logic from previous versions goes here) ...
     if (text.includes("i want to register")) {
-      await Vendor.findOneAndUpdate({ phoneNumber: sender }, { onboardingStep: 'askName' }, { upsert: true });
-      await sock.sendMessage(sender, { text: "👋 I hear you! Let's get started. What is your *Business Name*?" });
+        await sock.sendMessage(sender, { text: "👋 I'm your new Sales PA! What is your *Business Name*?" });
     }
   });
 }
 
-async function handleOnboarding(sock, sender, input, vendor) {
-    if (vendor.onboardingStep === 'askName') {
-        vendor.businessName = input;
-        vendor.onboardingStep = 'completed';
-        vendor.isApproved = true;
-        await vendor.save();
-        await sock.sendMessage(sender, { text: `✅ Thank you ${input}! Your registration is being processed.` });
-    }
-}
-
 startWhatsAppBot();
-app.listen(process.env.PORT || 10000);
