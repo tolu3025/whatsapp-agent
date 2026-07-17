@@ -1,4 +1,8 @@
+// ====================================================================
+// 1. ENVIRONMENT INITIALIZATION (MUST BE THE ABSOLUTE FIRST STEP)
+// ====================================================================
 require('dotenv').config();
+
 const { 
   default: makeWASocket, 
   useMultiFileAuthState, 
@@ -15,7 +19,7 @@ const app = express();
 app.use(express.json());
 
 // ==========================================
-// 1. DATABASE SCHEMAS & INITIALIZATION
+// 2. DATABASE SCHEMAS & INITIALIZATION
 // ==========================================
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('🟢 MongoDB Connected successfully.'))
@@ -55,13 +59,15 @@ const Vendor = mongoose.model('Vendor', VendorSchema);
 const Group = mongoose.model('Group', GroupSchema);
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 
-// Supabase Client Setup
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+// Supabase Client Setup (Initialized safely after environment validation)
+const supabase = createClient(
+  process.env.SUPABASE_URL, 
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 // ==========================================
-// 2. LIVE FLUTTERWAVE V4 UTILITIES
+// 3. LIVE FLUTTERWAVE V4 UTILITIES
 // ==========================================
-// Switched from Sandbox to the Live Flutterwave v4 Production URL
 const FLW_BASE_URL = process.env.FLW_BASE_URL || 'https://f4bexperience.flutterwave.com';
 const FLW_CLIENT_ID = process.env.FLW_CLIENT_ID;
 const FLW_CLIENT_SECRET = process.env.FLW_CLIENT_SECRET;
@@ -71,7 +77,7 @@ let tokenExpiresAt = 0;
 let bankCache = [];
 
 /**
- * Dynamically obtains OAuth2 Token for Flutterwave v4 Live.
+ * Dynamically obtains OAuth2 Token for Live Flutterwave v4.
  */
 async function getAuthToken() {
   if (accessToken && Date.now() < tokenExpiresAt) {
@@ -102,7 +108,7 @@ async function getAuthToken() {
 }
 
 /**
- * Fetch and cache banks from Flutterwave v4 Live.
+ * Fetch and cache banks from Live Flutterwave v4.
  */
 async function fetchAndCacheBanks() {
   try {
@@ -127,7 +133,7 @@ async function fetchAndCacheBanks() {
   }
 }
 
-// Perform initial pull and refresh every 24 hours
+// Initial bank pull and refresh loop every 24 hours
 fetchAndCacheBanks();
 setInterval(fetchAndCacheBanks, 24 * 60 * 60 * 1000);
 
@@ -201,7 +207,7 @@ async function verifyAccountNumber(accountNumber, bankCode) {
 }
 
 // ==========================================
-// 3. WHATSAPP ENGINE & PAIRING SYSTEM
+// 4. WHATSAPP BOT ENGINE (BAILEYS V7 RC)
 // ==========================================
 const registrationState = new Map();
 
@@ -273,7 +279,7 @@ async function startWhatsAppBot() {
 }
 
 // ==========================================
-// 4. FLOW HANDLERS (ONBOARDING, GROUP, TRANSACTIONS)
+// 5. FLOW HANDLERS (ONBOARDING, GROUP, TRANSACTIONS)
 // ==========================================
 async function handleWhatsAppFlow(sock, msg) {
   const sender = msg.key.remoteJid;
@@ -283,7 +289,7 @@ async function handleWhatsAppFlow(sock, msg) {
   if (!messageText) return;
   const cleanInput = messageText.toLowerCase().trim();
 
-  // --- PRIVATE CHAT: CONVERSATIONAL WIZARD ---
+  // --- PRIVATE CHATS: CONVERSATIONAL ONBOARDING WIZARD ---
   if (!isGroup) {
     if (registrationState.has(sender)) {
       await handleRegistrationWizard(sock, sender, messageText);
@@ -431,7 +437,7 @@ async function handleRegistrationWizard(sock, sender, text) {
       await newVendor.save();
       registrationState.delete(sender);
 
-      // Welcome Message + Instant Onboarding Tasks output
+      // Welcome Message + Dynamic Onboarding Tasks
       await sock.sendMessage(sender, { 
         text: `🎉 *Onboarding Successful!*\n\n*Merchant:* ${newVendor.businessName}\n*Verified Settlement Name:* ${newVendor.accountName}\n*Bank Name:* ${newVendor.bankName}\n\nYour Live settlement account has been linked successfully.\n\n-----------------------------\n📋 *YOUR ONBOARDING TASKS*\n-----------------------------\n\nTo activate and test your escrow setup, complete the following steps:\n\n1️⃣ *Initialize Your Group Escrow*\nGo to any WhatsApp transactional group where you sell products and type:\n👉 \`!init-escrow\`\n\n2️⃣ *Simulate a Customer Purchase*\nHave a buyer in that group (or your own secondary number) initiate a deal by typing:\n👉 \`!buy 10000\` (replacing 10000 with any test transaction amount).\n\n3️⃣ *Review Your Dashboard Insights*\nLog in to your Supabase merchant panel to verify that your business profile and newly initialized transaction logs sync immediately.\n\nLet me know if you run into any issues during setup!` 
       });
@@ -439,10 +445,10 @@ async function handleRegistrationWizard(sock, sender, text) {
   }
 }
 
-// Start WhatsApp
+// Start WhatsApp Connection Setup
 startWhatsAppBot();
 
-// Express Server
+// Express Server Setup
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server listening on port ${PORT}`);
