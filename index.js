@@ -22,7 +22,7 @@ app.use(express.json());
 // 1. RENDER HEALTH CHECK
 // ==========================================
 const PORT = process.env.PORT || 10000;
-app.get('/', (req, res) => res.send('Kukatai PA Active'));
+app.get('/', (req, res) => res.send('Kukatai PA Online'));
 app.listen(PORT, () => console.log(`🚀 Server live on port ${PORT}`));
 
 // ==========================================
@@ -33,15 +33,22 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ==========================================
-// 3. WHATSAPP BOT (MACOS CHROME FINGERPRINT)
+// 3. WHATSAPP BOT (LOOP-BREAKER VERSION)
 // ==========================================
-let pairingRequested = false;
+let isPairingRequested = false;
 
 async function startWhatsAppBot() {
-  console.log('📡 Starting WhatsApp Handshake...');
-
-  // Use a stable, high protocol version
-  const version = [2, 3000, 1017578213]; 
+  console.log('📡 Fetching latest WhatsApp protocol...');
+  
+  // DYNAMIC VERSION FETCHING (Prevents 405)
+  let version = [2, 3000, 1015901307]; // Safe fallback
+  try {
+    const { version: latest } = await fetchLatestBaileysVersion();
+    version = latest;
+    console.log(`✅ Using WA Version: ${version.join('.')}`);
+  } catch (e) {
+    console.log('⚠️ Version fetch failed, using fallback.');
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
 
@@ -53,15 +60,13 @@ async function startWhatsAppBot() {
     },
     logger: pino({ level: 'silent' }),
     
-    // 🖥️ EXACT MAC OS CHROME FINGERPRINT
-    browser: ['Mac OS', 'Chrome', '10.15.7'], 
+    // WINDOWS CHROME FINGERPRINT (More stable for linking)
+    browser: ['Windows', 'Chrome', '110.0.5481.178'], 
     
     syncFullHistory: false,
     shouldSyncHistoryMessage: () => false,
     connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 0,
-    keepAliveIntervalMs: 15000,
-    generateHighQualityLinkPreview: true,
+    keepAliveIntervalMs: 30000,
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -69,44 +74,49 @@ async function startWhatsAppBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr && !sock.authState.creds.registered && !pairingRequested) {
-      pairingRequested = true;
+    if (qr && !sock.authState.creds.registered && !isPairingRequested) {
+      isPairingRequested = true;
       const pairingNumber = process.env.PAIRING_NUMBER;
       
       if (pairingNumber) {
-        // Wait 15 seconds to ensure the server is fully ready
-        console.log(`⏳ Waiting for secure channel to +${pairingNumber}...`);
-        await delay(15000); 
+        console.log(`⏳ Stabilizing connection for ${pairingNumber}...`);
+        await delay(20000); // 20-second delay to ensure socket is ready
         
         try {
           const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
           console.log(`🔑 ==========================================`);
-          console.log(`🔑 YOUR WHATSAPP PAIRING CODE: ${code}`);
+          console.log(`🔑 NEW PAIRING CODE: ${code}`);
           console.log(`🔑 ==========================================`);
         } catch (e) {
-          console.error("🔴 Pairing Error:", e.message);
-          pairingRequested = false;
+          console.error("🔴 Pairing request failed. Will retry...");
+          isPairingRequested = false;
         }
       }
     }
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      pairingRequested = false;
+      isPairingRequested = false;
 
-      if (statusCode === 405 || statusCode === 401) {
-        console.log('🧹 Session Poisoned. Wiping and Restarting...');
+      // Only wipe if it's a truly fatal session error
+      if (statusCode === 401) {
+        console.log('🧹 Session expired/logged out. Wiping...');
         if (fs.existsSync('./auth_session')) {
           fs.rmSync('./auth_session', { recursive: true, force: true });
         }
-        setTimeout(startWhatsAppBot, 5000);
-      } else if (statusCode !== DisconnectReason.loggedOut) {
-        console.log(`🔄 Connection blip (${statusCode}). Reconnecting...`);
+        setTimeout(startWhatsAppBot, 10000);
+      } 
+      else if (statusCode === 405) {
+        console.log('⚠️ WhatsApp rejected version (405). Retrying with delay...');
+        setTimeout(startWhatsAppBot, 20000); // Wait longer to avoid IP flagging
+      }
+      else if (statusCode !== DisconnectReason.loggedOut) {
+        console.log(`🔄 Reconnecting (Status: ${statusCode})...`);
         setTimeout(startWhatsAppBot, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 SUCCESS: AGENT CONNECTED AS MAC OS CHROME!');
-      pairingRequested = false;
+      console.log('🟢 SUCCESS: AGENT IS ONLINE!');
+      isPairingRequested = false;
     }
   });
 
@@ -120,12 +130,10 @@ async function startWhatsAppBot() {
 
     console.log(`📩 [${sender}]: ${text}`);
 
-    // (AI and Onboarding logic remain here...)
     if (text.includes("i want to register")) {
-        await sock.sendMessage(sender, { text: "👋 I see you! Ready to set up your Vendor PA. What is your *Business Name*?" });
+        await sock.sendMessage(sender, { text: "👋 I'm online! I've detected your registration request. What is your *Business Name*?" });
     }
   });
 }
 
-// Start the engine
 startWhatsAppBot();
