@@ -6,7 +6,8 @@ const {
   delay,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  jidNormalizedUser 
+  jidNormalizedUser,
+  Browsers
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -39,7 +40,7 @@ const Vendor = mongoose.model('Vendor', new mongoose.Schema({
 
 const registrationState = new Map();
 let hasRequestedCode = false;
-let sock; // Global access
+let sock; 
 
 // ==========================================
 // 2. KUKAPAY REALTIME LISTENER
@@ -60,12 +61,12 @@ const initSupabase = () => {
 };
 
 // ==========================================
-// 3. WHATSAPP ENGINE (REPLY FIX & STABILITY)
+// 3. WHATSAPP ENGINE (FIXED FOR 401 & 515)
 // ==========================================
 async function startWhatsAppBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
   
-  console.log('📡 Fetching latest WhatsApp protocol...');
+  // Dynamic version fetching to avoid 405 errors
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
@@ -75,11 +76,14 @@ async function startWhatsAppBot() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
-    browser: ["Mac OS", "Chrome", "126.0.0.0"], 
+    // FINGERPRINT: Using standard macOS desktop identity for higher stability
+    browser: Browsers.macOS('Desktop'), 
     
+    // --- STABILITY FIXES FOR RENDER ---
     syncFullHistory: false, 
     fireInitQueries: false,
-    shouldSyncHistoryMessage: () => false, 
+    shouldSyncHistoryMessage: () => false, // PREVENTS 515 & 401 LOGOUTS
+    markOnlineOnConnect: true,
     
     connectTimeoutMs: 60000, 
     defaultQueryTimeoutMs: 0, 
@@ -91,10 +95,12 @@ async function startWhatsAppBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    // Pairing Logic
     if (!sock.authState.creds.registered && !hasRequestedCode) {
         hasRequestedCode = true;
         const pairingNumber = process.env.PAIRING_NUMBER;
         if (pairingNumber) {
+            console.log(`⏳ Initializing Link for ${pairingNumber}...`);
             await delay(10000); 
             try {
                 const code = await sock.requestPairingCode(pairingNumber.replace(/[^0-9]/g, ''));
@@ -105,21 +111,24 @@ async function startWhatsAppBot() {
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      console.log(`🔴 Connection Closed. Code: ${code}`);
+      console.log(`🔴 Connection Lost. Reason Code: ${code}`);
       hasRequestedCode = false;
-      if (code === 401 || code === 405) {
+
+      // If 401, 405, or Logout, wipe the session to prevent retry-loops
+      if (code === 401 || code === 405 || code === DisconnectReason.loggedOut) {
+        console.log("🧹 Wiping session for fresh start...");
         if (fs.existsSync('./auth_session')) fs.rmSync('./auth_session', { recursive: true, force: true });
         setTimeout(startWhatsAppBot, 5000);
       } else {
         setTimeout(startWhatsAppBot, 10000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 SUCCESS: Device Linked & Agent Online!');
+      console.log('🟢 SUCCESS: Device Linked & Agent is Live!');
       hasRequestedCode = false;
     }
   });
 
-  // --- MESSAGE LISTENER (THE FIX IS HERE) ---
+  // --- MESSAGE HANDLER (FIXED REPLY TRIGGER) ---
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     const msg = messages[0];
@@ -129,18 +138,22 @@ async function startWhatsAppBot() {
     const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").trim();
     const cleanInput = text.toLowerCase();
 
-    console.log(`📩 [${sender}]: ${text}`); // See exactly what users are sending
+    console.log(`📩 Message Received from ${sender}: ${text}`);
 
-    // 1. Logic for Customers messaging a Live Vendor
-    const liveVendor = await Vendor.findOne({ isLive: true }); 
-    if (liveVendor && !registrationState.has(sender) && !['register', 'onboard', 'start'].some(t => cleanInput.includes(t))) {
-        return handleSalesAI(sender, text, liveVendor);
+    // 1. Check for Onboarding Triggers (Partial Match)
+    const onboardingTriggers = ['register', 'onboard', 'start', 'i want to register'];
+    const isOnboardingTrigger = onboardingTriggers.some(t => cleanInput.includes(t));
+
+    if (registrationState.has(sender) || isOnboardingTrigger) {
+        console.log(`📝 Routing ${sender} to Onboarding Wizard`);
+        return handleVendorOnboarding(sender, msg);
     }
 
-    // 2. Logic for Onboarding (Fixed Trigger)
-    const onboardingTriggers = ['register', 'onboard', 'start', 'i want to register'];
-    if (registrationState.has(sender) || onboardingTriggers.some(t => cleanInput.includes(t))) {
-        return handleVendorOnboarding(sender, msg);
+    // 2. Sales Agent Mode for Live Vendors
+    const liveVendor = await Vendor.findOne({ isLive: true }); 
+    if (liveVendor && !registrationState.has(sender)) {
+        console.log(`🤖 AI Sales Agent responding for ${liveVendor.businessName}`);
+        return handleSalesAI(sender, text, liveVendor);
     }
   });
 }
@@ -152,7 +165,7 @@ async function handleSalesAI(customerJid, text, vendor) {
     const input = text.toLowerCase();
     if (input.includes('price') || input.includes('catalog')) {
         const items = vendor.catalog.map(i => `🛍️ *${i.caption}*\n💰 ₦${i.price.toLocaleString()}\n`).join('\n');
-        await sock.sendMessage(customerJid, { text: `You have great taste! 😍 Check out our catalog for *${vendor.businessName}*:\n\n${items}` });
+        await sock.sendMessage(customerJid, { text: `You have great taste! 😍 Here is our catalog for *${vendor.businessName}*:\n\n${items}` });
     } else if (input.includes('buy') || input.match(/\d+/)) {
         try {
             const res = await axios.post('https://api.flutterwave.com/v3/payments', {
@@ -172,6 +185,7 @@ async function handleSalesAI(customerJid, text, vendor) {
 async function handleVendorOnboarding(sender, msg) {
     if (!registrationState.has(sender)) {
         registrationState.set(sender, { step: 'name' });
+        console.log(`Step 1: Asking ${sender} for Business Name`);
         return sock.sendMessage(sender, { text: "Hello! 👋 I'm your AI Agent. What is your *Business Name*?" });
     }
     const state = registrationState.get(sender);
@@ -210,7 +224,7 @@ async function handleVendorOnboarding(sender, msg) {
                 const newVendor = new Vendor({ ...state, phoneNumber: sender, isLive: true });
                 await newVendor.save();
                 registrationState.delete(sender);
-                await sock.sendMessage(sender, { text: "🎉 *LIVE!* I am now your Sales Agent. I will attend to your customers and handle payments via Kukapay." });
+                await sock.sendMessage(sender, { text: "🎉 *LIVE!* I am now your Sales Agent." });
             } else if (msg.message?.imageMessage) {
                 const cap = msg.message.imageMessage.caption || "";
                 const price = parseInt(cap.match(/\d+/)?.[0]) || 0;
@@ -222,7 +236,7 @@ async function handleVendorOnboarding(sender, msg) {
     registrationState.set(sender, state);
 }
 
-// Keep Render Awake
+// Render Awake
 app.get('/', (req, res) => res.send('Bot Active ⚡'));
 setInterval(() => {
     if (process.env.RENDER_EXTERNAL_URL) axios.get(process.env.RENDER_EXTERNAL_URL).catch(() => {});
