@@ -17,13 +17,13 @@ const fs = require('fs');
 const express = require('express');
 
 // ==========================================
-// 1. INITIALIZATION & SERVER SETUP
+// 1. INITIALIZATION & SERVER
 // ==========================================
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-app.get('/', (req, res) => res.send('Kukatai PA Agent Online'));
+app.get('/', (req, res) => res.send('Kukatai PA Active'));
 app.listen(PORT, () => console.log(`🚀 Health Check Live on Port ${PORT}`));
 
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('🟢 MongoDB Connected'));
@@ -44,7 +44,6 @@ const Vendor = mongoose.model('Vendor', new mongoose.Schema({
   accountName: String,
   flwSubaccountId: String,
   description: String,
-  faqs: String,
   catalog: [{ imageUrl: String, caption: String, price: Number }],
   activeGroups: [String],
   onboardingStep: { type: String, default: 'none' },
@@ -62,7 +61,7 @@ const Transaction = mongoose.model('Transaction', new mongoose.Schema({
 }));
 
 // ==========================================
-// 3. FLUTTERWAVE V4 SERVICE (Verified & Split)
+// 3. FLUTTERWAVE V4 UTILITIES
 // ==========================================
 class FlutterwaveService {
   constructor() {
@@ -102,7 +101,7 @@ class FlutterwaveService {
       business_name: vendor.businessName,
       business_email: vendor.email || 'vendor@kukatapai.com',
       split_type: "percentage",
-      split_value: 0.05 // Your 5% commission
+      split_value: 0.05 // 5% platform fee
     }, { headers: { Authorization: `Bearer ${token}` } });
     return res.data.data.subaccount_id;
   }
@@ -120,12 +119,12 @@ class FlutterwaveService {
 const flw = new FlutterwaveService();
 
 // ==========================================
-// 4. WHATSAPP BOT ENGINE (MAC OS CHROME)
+// 4. WHATSAPP ENGINE (MAC OS CHROME FINGERPRINT)
 // ==========================================
 let pairingRequested = false;
 
 async function startAgent() {
-  await flw.fetchBanks(); // Load banks for onboarding
+  await flw.fetchBanks();
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState('auth_session');
 
@@ -136,7 +135,10 @@ async function startAgent() {
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
     logger: pino({ level: 'silent' }),
-    browser: ['Mac OS', 'Chrome', '126.0.6478.127'], // Trust fingerprint
+    
+    // 🖥️ MAC OS CHROME FINGERPRINT (Definitive pairing fix)
+    browser: ['Mac OS', 'Chrome', '10.15.7'], 
+    
     syncFullHistory: false,
     shouldSyncHistoryMessage: () => false,
     connectTimeoutMs: 60000,
@@ -150,8 +152,8 @@ async function startAgent() {
 
     if (qr && !sock.authState.creds.registered && !pairingRequested) {
       pairingRequested = true;
-      console.log('⏳ Stabilizing Socket for Pairing...');
-      await delay(15000); // Handshake warmup
+      console.log('📡 Channel stabilizing for pairing...');
+      await delay(15000); // 15s wait for socket trust
       try {
         const code = await sock.requestPairingCode(process.env.PAIRING_NUMBER.replace(/[^0-9]/g, ''));
         console.log(`🔑 YOUR PAIRING CODE: ${code}`);
@@ -168,9 +170,9 @@ async function startAgent() {
         setTimeout(startAgent, 5000);
       }
     } else if (connection === 'open') {
-      console.log('🟢 SUCCESS: AGENT IS CONNECTED');
+      console.log('🟢 SUCCESS: AGENT CONNECTED AS MAC OS CHROME');
       initSupabaseObserver(sock);
-      startCatalogBroadcast(sock);
+      startCatalogLoop(sock);
     }
   });
 
@@ -180,30 +182,32 @@ async function startAgent() {
     if (!msg.message || msg.key.fromMe) return;
 
     const sender = jidNormalizedUser(msg.key.remoteJid);
-    const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "").toLowerCase().trim();
+    const rawText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || "");
+    const cleanText = rawText.toLowerCase().trim();
+
     const vendor = await Vendor.findOne({ phoneNumber: sender }) || await Vendor.findOne({ isApproved: true });
 
-    // ONBOARDING WIZARD
+    // ONBOARDING HANDLER
     if (vendor && vendor.onboardingStep !== 'none' && vendor.onboardingStep !== 'completed') {
-      return handleOnboarding(sock, sender, msg.message?.conversation || msg.message?.extendedTextMessage?.text, vendor);
+      return handleOnboarding(sock, sender, rawText, vendor);
     }
 
-    // TRIGGER
-    if (text === "i want to register") {
+    // REGISTRATION TRIGGER
+    if (cleanText === "i want to register") {
       await Vendor.findOneAndUpdate({ phoneNumber: sender }, { onboardingStep: 'askName' }, { upsert: true });
-      return sock.sendMessage(sender, { text: "👋 Welcome! What is your *Business Name*?" });
+      return sock.sendMessage(sender, { text: "👋 Welcome! I am your AI Sales PA. What is your *Official Business Name*?" });
     }
 
     // AI SALES CHAT
     if (vendor && vendor.isApproved) {
       await sock.sendPresenceUpdate('composing', sender);
-      const aiResponse = await getAIResponse(text, vendor);
+      const aiResponse = await getAIResponse(rawText, vendor);
 
       if (aiResponse.includes("TRIGGER_PAYMENT:")) {
         const amount = aiResponse.split(":")[1].trim();
         const pay = await flw.createVirtualAccount(amount, vendor.flwSubaccountId);
         await new Transaction({ txRef: pay.txRef, customerPhone: sender, vendorId: vendor._id, amount, virtualAccount: pay.account_number }).save();
-        await sock.sendMessage(sender, { text: `💰 *Secure Payment Ready!* \n\nPlease transfer ₦${amount} to:\n🏦 *${pay.bank_name}*\n🔢 *${pay.account_number}*\n\nI'll confirm automatically! ✨` });
+        await sock.sendMessage(sender, { text: `💰 *Secure Payment Generated!* \n\nPlease transfer ₦${amount} to:\n🏦 *${pay.bank_name}*\n🔢 *${pay.account_number}*\n\nI'll notify you here once confirmed! ✨` });
       } else {
         await sock.sendMessage(sender, { text: aiResponse });
       }
@@ -212,41 +216,41 @@ async function startAgent() {
 }
 
 // ==========================================
-// 5. HELPER LOGIC (Onboarding, AI, Observers)
+// 5. CORE LOGIC (Onboarding & Automation)
 // ==========================================
 async function handleOnboarding(sock, sender, input, vendor) {
   switch (vendor.onboardingStep) {
     case 'askName':
       vendor.businessName = input; vendor.onboardingStep = 'askBank';
       await vendor.save();
-      await sock.sendMessage(sender, { text: "Which *Bank* (e.g. Opay, Zenith, GTB)?" });
+      await sock.sendMessage(sender, { text: "Got it. Which *Bank* do you use (e.g. Opay, Zenith, GTB)?" });
       break;
     case 'askBank':
       const bank = flw.bankCache.find(b => b.name.toLowerCase().includes(input.toLowerCase()));
-      if (!bank) return sock.sendMessage(sender, { text: "⚠️ Bank not found. Try again:" });
+      if (!bank) return sock.sendMessage(sender, { text: "⚠️ Bank not found. Please type the full name:" });
       vendor.bankName = bank.name; vendor.bankCode = bank.code;
       vendor.onboardingStep = 'askAcc'; await vendor.save();
       await sock.sendMessage(sender, { text: `Bank Set: *${bank.name}*. Send your *10-digit Account Number*:` });
       break;
     case 'askAcc':
       const verified = await flw.verifyAccount(input.trim(), vendor.bankCode);
-      if (!verified) return sock.sendMessage(sender, { text: "❌ Invalid details. Re-send 10-digit number:" });
+      if (!verified) return sock.sendMessage(sender, { text: "❌ Invalid account. Re-send 10-digit number:" });
       vendor.accountNumber = input.trim(); vendor.accountName = verified.account_name;
       vendor.onboardingStep = 'finalize'; await vendor.save();
-      await sock.sendMessage(sender, { text: `✅ Verified: *${verified.account_name}*\n\nFinal step: Send a short *Business Description*:` });
+      await sock.sendMessage(sender, { text: `✅ Account Verified: *${verified.account_name}*\n\nLast step: Send your *Business Description*:` });
       break;
     case 'finalize':
       vendor.description = input;
       vendor.flwSubaccountId = await flw.createSubaccount(vendor);
       vendor.onboardingStep = 'completed'; vendor.isApproved = true;
       await vendor.save();
-      await sock.sendMessage(sender, { text: `🎉 *Registration Complete!*\n\nBusiness: ${vendor.businessName}\nStatus: Active. I am now your PA!` });
+      await sock.sendMessage(sender, { text: `🎉 *Onboarding Successful!*\n\nBusiness: ${vendor.businessName}\nStatus: Active. I am now your PA!` });
       break;
   }
 }
 
 async function getAIResponse(text, vendor) {
-  const prompt = `You are a jovial sales PA for ${vendor.businessName}. Tone: Helpful, Fun, Nigerian. If customer is ready to buy, say TRIGGER_PAYMENT:[price]. Info: ${vendor.description}`;
+  const prompt = `You are a jovial sales PA for ${vendor.businessName}. Tone: Helpful, Fun, Nigerian. Bio: ${vendor.description}. If customer wants to buy, say TRIGGER_PAYMENT:[price].`;
   const res = await openai.chat.completions.create({
     model: "gpt-3.5-turbo", messages: [{ role: "system", content: prompt }, { role: "user", content: text }]
   });
@@ -265,12 +269,12 @@ function initSupabaseObserver(sock) {
   }).subscribe();
 }
 
-function startCatalogBroadcast(sock) {
+function startCatalogLoop(sock) {
   setInterval(async () => {
     const vendors = await Vendor.find({ isApproved: true });
     for (const v of vendors) {
       if (v.catalog.length > 0 && v.activeGroups.length > 0) {
-        const item = v.catalog[0];
+        const item = v.catalog[Math.floor(Math.random() * v.catalog.length)];
         for (const g of v.activeGroups) {
           await sock.sendMessage(g, { image: { url: item.imageUrl }, caption: `🔥 *Check this out from ${v.businessName}!* \n\nOnly ₦${item.price.toLocaleString()}` });
         }
